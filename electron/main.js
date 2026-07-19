@@ -2,6 +2,7 @@ const { app, BrowserWindow, ipcMain, session, Menu, clipboard, shell } = require
 const path = require('path');
 const Store = require('electron-store').default;
 const firebaseSync = require('./firebase-sync');
+const { initAutoUpdater } = require('./updater');
 
 const CHROME_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -463,6 +464,7 @@ async function initFirebaseSync() {
 
 app.whenReady().then(() => {
   createWindow();
+  initAutoUpdater();
   // Initialize Firebase sync after window is ready
   initFirebaseSync();
 });

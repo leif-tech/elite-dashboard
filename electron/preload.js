@@ -29,4 +29,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.removeAllListeners('sync-accounts-updated');
     ipcRenderer.on('sync-accounts-updated', (_, accounts) => callback(accounts));
   },
+  // Auto-updater
+  onUpdateAvailable: (callback) => {
+    ipcRenderer.removeAllListeners('update-available');
+    ipcRenderer.on('update-available', (_, version) => callback(version));
+  },
+  onUpdateProgress: (callback) => {
+    ipcRenderer.removeAllListeners('update-progress');
+    ipcRenderer.on('update-progress', (_, percent) => callback(percent));
+  },
 });
