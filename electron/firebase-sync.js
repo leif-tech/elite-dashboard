@@ -9,6 +9,7 @@ let firebaseApp, db, auth;
 let initialized = false;
 let store = null;
 let realtimeUnsubscribe = null;
+let autoUploadInterval = null;
 let syncStatusCallback = null;
 let lastUploadHashes = new Map(); // accountId -> hash
 let cachedDerivedKey = null; // cache PBKDF2 result
@@ -189,6 +190,7 @@ async function initSync(electronStore, statusCb) {
 
     await downloadAllSessions();
     startRealtimeListener();
+    startAutoUpload();
 
     return true;
   } catch (err) {
@@ -202,6 +204,10 @@ function stopSync() {
   if (realtimeUnsubscribe) {
     realtimeUnsubscribe();
     realtimeUnsubscribe = null;
+  }
+  if (autoUploadInterval) {
+    clearInterval(autoUploadInterval);
+    autoUploadInterval = null;
   }
   initialized = false;
   emitStatus({ connected: false });
@@ -407,6 +413,16 @@ function startRealtimeListener() {
       console.error('[Firebase Sync] Listener error:', err.message);
     }
   );
+}
+
+// ============ AUTO UPLOAD ============
+const AUTO_UPLOAD_INTERVAL = 5 * 60 * 1000; // 5 minutes
+
+function startAutoUpload() {
+  if (autoUploadInterval) clearInterval(autoUploadInterval);
+  autoUploadInterval = setInterval(() => {
+    uploadAllSessions(false).catch(() => {});
+  }, AUTO_UPLOAD_INTERVAL);
 }
 
 // ============ EXPORTS ============
