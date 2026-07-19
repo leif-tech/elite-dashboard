@@ -302,7 +302,17 @@ async function initSync(electronStore, statusCb) {
     initialized = true;
     emitStatus({ connected: true, lastSync: null, accounts: 0 });
 
-    await downloadAllSessions();
+    // Only auto-download on fresh installs (no local accounts)
+    // Existing devices should never have their data overwritten on startup
+    const localAccounts = store.get('accounts') || [];
+    if (localAccounts.length === 0) {
+      await downloadAllSessions();
+    } else {
+      // Mark all local accounts as owned so real-time listener won't touch them
+      for (const acct of localAccounts) {
+        locallyOwnedSessions.add(acct.id);
+      }
+    }
     startRealtimeListener();
     startAutoUpload();
 
