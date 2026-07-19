@@ -284,7 +284,19 @@ ipcMain.handle('set-api-key', async (_, key) => {
   }
   return true;
 });
-ipcMain.handle('get-accounts', () => store.get('accounts'));
+// Helper: only return accounts with active cookies
+async function getActiveAccounts() {
+  const accounts = store.get('accounts') || [];
+  const active = [];
+  for (const acct of accounts) {
+    const ses = session.fromPartition(`persist:of-${acct.id}`);
+    const cookies = await ses.cookies.get({});
+    if (cookies.length > 0) active.push(acct);
+  }
+  return active;
+}
+
+ipcMain.handle('get-accounts', () => getActiveAccounts());
 ipcMain.handle('save-account', (_, account) => {
   const accounts = store.get('accounts');
   const idx = accounts.findIndex((a) => a.id === account.id);
@@ -454,7 +466,7 @@ ipcMain.handle('sync-download', async () => {
   const result = await firebaseSync.downloadAllSessions(true); // force=true bypasses own-upload skip
   // Notify renderer to refresh accounts and signal sync complete
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('sync-accounts-updated', store.get('accounts') || []);
+    getActiveAccounts().then(a => mainWindow.webContents.send('sync-accounts-updated', a));
     mainWindow.webContents.send('sync-ready');
   }
   return { success: true, ...result };
@@ -471,7 +483,7 @@ ipcMain.handle('sync-reset', async () => {
   if (!firebaseSync.isInitialized) return { success: false, error: 'Not connected' };
   const result = await firebaseSync.resetSync();
   if (mainWindow && !mainWindow.isDestroyed()) {
-    mainWindow.webContents.send('sync-accounts-updated', store.get('accounts') || []);
+    getActiveAccounts().then(a => mainWindow.webContents.send('sync-accounts-updated', a));
   }
   return result;
 });
@@ -490,7 +502,7 @@ async function initFirebaseSync() {
     // After initial download completes, notify renderer to refresh account list
     // This ensures any newly-synced accounts appear in the sidebar
     if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('sync-accounts-updated', store.get('accounts') || []);
+      getActiveAccounts().then(a => mainWindow.webContents.send('sync-accounts-updated', a));
       // Signal that sync download is complete — webviews can now load with valid cookies
       mainWindow.webContents.send('sync-ready');
     }
