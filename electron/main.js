@@ -425,13 +425,13 @@ ipcMain.handle('sync-force', async () => {
     });
     if (!ok) return { success: false, error: 'Failed to connect' };
   }
-  await firebaseSync.uploadAllSessions();
+  await firebaseSync.uploadAllSessions(true); // force=true bypasses hash check
   return { success: true };
 });
 
 ipcMain.handle('sync-download', async () => {
   if (!firebaseSync.isInitialized) return { success: false, error: 'Not connected' };
-  const result = await firebaseSync.downloadAllSessions();
+  const result = await firebaseSync.downloadAllSessions(true); // force=true bypasses own-upload skip
   // Notify renderer to refresh accounts
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sync-accounts-updated', store.get('accounts') || []);

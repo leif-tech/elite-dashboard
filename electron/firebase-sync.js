@@ -124,7 +124,7 @@ function emitStatus(status) {
 }
 
 // ============ UPLOAD ============
-async function uploadSession(accountId) {
+async function uploadSession(accountId, force = false) {
   if (!initialized || !db || !store) return;
 
   const apiKey = store.get('apiKey');
@@ -155,9 +155,9 @@ async function uploadSession(accountId) {
 
     if (cookies.length === 0) return;
 
-    // Check if changed
+    // Check if changed (skip if force)
     const hash = hashCookies(cookies);
-    if (lastUploadHashes.get(accountId) === hash) return; // No change
+    if (!force && lastUploadHashes.get(accountId) === hash) return; // No change
 
     // Encrypt and upload
     const encrypted = encrypt(JSON.stringify(cookies), apiKey);
@@ -192,16 +192,16 @@ async function uploadSession(accountId) {
   }
 }
 
-async function uploadAllSessions() {
+async function uploadAllSessions(force = false) {
   if (!initialized || !store) return;
   const accounts = store.get('accounts') || [];
   for (const acct of accounts) {
-    await uploadSession(acct.id);
+    await uploadSession(acct.id, force);
   }
 }
 
 // ============ DOWNLOAD ============
-async function downloadAllSessions() {
+async function downloadAllSessions(force = false) {
   if (!initialized || !db || !store) return;
 
   const apiKey = store.get('apiKey');
@@ -237,8 +237,8 @@ async function downloadAllSessions() {
       const data = docSnap.data();
       const accountId = docSnap.id;
 
-      // Skip if we uploaded this ourselves (no need to re-import our own cookies)
-      if (data.updatedBy === machineId) {
+      // Skip if we uploaded this ourselves (unless force download)
+      if (!force && data.updatedBy === machineId) {
         lastUploadHashes.set(accountId, data.cookieHash);
         continue;
       }
@@ -263,6 +263,16 @@ async function importSession(accountId, data, apiKey) {
     const cookies = JSON.parse(decrypted);
 
     const ses = session.fromPartition(`persist:of-${accountId}`);
+
+    // Clear existing OF cookies first to prevent duplicates
+    const existing = await ses.cookies.get({ url: 'https://onlyfans.com' });
+    for (const c of existing) {
+      try {
+        const proto = c.secure ? 'https' : 'http';
+        await ses.cookies.remove(`${proto}://${c.domain.replace(/^\./, '')}${c.path}`, c.name);
+      } catch {}
+    }
+
     const now = Date.now() / 1000;
     let imported = 0;
     let failed = 0;
