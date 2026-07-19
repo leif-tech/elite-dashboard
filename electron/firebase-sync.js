@@ -12,6 +12,7 @@ let realtimeUnsubscribe = null;
 let autoUploadInterval = null;
 let syncStatusCallback = null;
 let lastUploadHashes = new Map(); // accountId -> hash
+let locallyOwnedSessions = new Set(); // sessions with active local login — don't overwrite
 let cachedDerivedKey = null; // cache PBKDF2 result
 let cachedKeySource = null; // the API key used to derive
 
@@ -365,6 +366,12 @@ async function uploadSession(accountId, force = false) {
       return;
     }
 
+    // Only upload if this device actually logged in (has cookies) — prevent uploading stale/empty data
+    if (cookies.length === 0 && !locallyOwnedSessions.has(accountId)) {
+      console.log(`[Firebase Sync] Skipping upload for ${accountId} — no local cookies and not locally owned`);
+      return;
+    }
+
     // Build payload and hash
     const payload = { cookies, partition: packed ? packed.toString('base64') : null };
     const payloadStr = JSON.stringify(payload);
@@ -393,6 +400,7 @@ async function uploadSession(accountId, force = false) {
     });
 
     lastUploadHashes.set(accountId, hash);
+    locallyOwnedSessions.add(accountId); // This device owns this session — block incoming overwrites
 
     const accounts = store.get('accounts') || [];
     const acct = accounts.find((a) => a.id === accountId);
@@ -533,6 +541,12 @@ function startRealtimeListener() {
         if (data.updatedBy === machineId) continue;
         if (!data.data && !data.partition) continue;
 
+        // Don't overwrite sessions that have an active local login
+        if (locallyOwnedSessions.has(accountId)) {
+          console.log(`[Firebase Sync] Skipping real-time update for ${accountId} — locally owned`);
+          continue;
+        }
+
         // Queue sequentially to prevent concurrent file writes
         realtimeQueue = realtimeQueue.then(async () => {
           try {
@@ -573,6 +587,10 @@ function startAutoUpload() {
   }, AUTO_UPLOAD_INTERVAL);
 }
 
+function markLocallyOwned(accountId) {
+  locallyOwnedSessions.add(accountId);
+}
+
 // ============ EXPORTS ============
 module.exports = {
   initSync,
@@ -580,5 +598,6 @@ module.exports = {
   uploadSession,
   uploadAllSessions,
   downloadAllSessions,
+  markLocallyOwned,
   get isInitialized() { return initialized; },
 };

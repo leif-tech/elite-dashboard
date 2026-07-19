@@ -171,6 +171,12 @@ function createWindow() {
     const prefs = wvContents.getLastWebPreferences();
     const partition = prefs?.partition || 'persist:default';
 
+    // Mark this session as locally owned — prevents real-time sync from overwriting active login
+    const acctMatch = partition.match(/^persist:of-(.+)$/);
+    if (acctMatch) {
+      firebaseSync.markLocallyOwned(acctMatch[1]);
+    }
+
     const wvSession = session.fromPartition(partition);
     spoofHeaders(wvSession);
 
@@ -270,7 +276,14 @@ ipcMain.handle('open-external', (_, url) => {
 });
 
 ipcMain.handle('get-api-key', () => store.get('apiKey'));
-ipcMain.handle('set-api-key', (_, key) => { store.set('apiKey', key); return true; });
+ipcMain.handle('set-api-key', async (_, key) => {
+  store.set('apiKey', key);
+  // Auto-init sync when API key is set (handles fresh installs)
+  if (!firebaseSync.isInitialized && key) {
+    await initFirebaseSync();
+  }
+  return true;
+});
 ipcMain.handle('get-accounts', () => store.get('accounts'));
 ipcMain.handle('save-account', (_, account) => {
   const accounts = store.get('accounts');
