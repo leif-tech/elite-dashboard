@@ -140,7 +140,7 @@ export default function App() {
               <button
                 onClick={() => setActiveId(acct.id)}
                 onMouseEnter={() => setHoveredAcct(acct)}
-                onMouseLeave={() => setHoveredAcct(null)}
+                onMouseLeave={() => { setHoveredAcct(null); setConfirmRemove(null); }}
                 className={`w-[42px] h-[42px] rounded-full flex items-center justify-center text-sm font-bold transition-all shrink-0 ${
                   activeId === acct.id
                     ? 'ring-2 ring-accent ring-offset-2 ring-offset-dark-900 bg-dark-500 text-white'
@@ -475,12 +475,14 @@ function OFWebview({ accountId, proxy, onToggleProxy }) {
   }, [accountId]);
 
   const closeTab = (id) => {
-    setTabs((prev) => {
-      const filtered = prev.filter((t) => t.id !== id);
-      if (filtered.length === 0) return [{ id: 1, title: 'OnlyFans', url: 'https://onlyfans.com' }];
+    const filtered = tabs.filter((t) => t.id !== id);
+    if (filtered.length === 0) {
+      setTabs([{ id: 1, title: 'OnlyFans', url: 'https://onlyfans.com' }]);
+      setActiveTab(1);
+    } else {
+      setTabs(filtered);
       if (activeTab === id) setActiveTab(filtered[filtered.length - 1].id);
-      return filtered;
-    });
+    }
   };
 
   const addTab = () => {

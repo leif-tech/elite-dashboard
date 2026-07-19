@@ -252,13 +252,21 @@ function createWindow() {
 }
 
 // Window controls
-ipcMain.handle('win-minimize', () => mainWindow.minimize());
+ipcMain.handle('win-minimize', () => mainWindow?.minimize());
 ipcMain.handle('win-maximize', () => {
+  if (!mainWindow) return;
   if (mainWindow.isMaximized()) mainWindow.unmaximize();
   else mainWindow.maximize();
 });
-ipcMain.handle('win-close', () => mainWindow.close());
-ipcMain.handle('open-external', (_, url) => shell.openExternal(url));
+ipcMain.handle('win-close', () => mainWindow?.close());
+ipcMain.handle('open-external', (_, url) => {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
+      return shell.openExternal(url);
+    }
+  } catch {}
+});
 
 ipcMain.handle('get-api-key', () => store.get('apiKey'));
 ipcMain.handle('set-api-key', (_, key) => { store.set('apiKey', key); return true; });
@@ -276,8 +284,12 @@ ipcMain.handle('save-account', (_, account) => {
   return accounts;
 });
 ipcMain.handle('remove-account', (_, id) => {
-  const accounts = store.get('accounts').filter((a) => a.id !== id);
+  const allAccounts = store.get('accounts');
+  const removed = allAccounts.find((a) => a.id === id);
+  const accounts = allAccounts.filter((a) => a.id !== id);
   store.set('accounts', accounts);
+  // Clean up proxy credentials for removed account
+  if (removed?.proxy) unregisterProxyAuth(removed.proxy);
   session.fromPartition(`persist:of-${id}`).clearStorageData();
   return accounts;
 });
@@ -307,6 +319,8 @@ ipcMain.handle('set-proxy', async (_, { accountId, proxy }) => {
   // Save proxy config to account
   const accounts = store.get('accounts');
   const idx = accounts.findIndex((a) => a.id === accountId);
+  // Capture old proxy BEFORE mutating
+  const oldProxy = idx >= 0 ? accounts[idx].proxy : null;
   if (idx >= 0) {
     accounts[idx].proxy = proxy;
     store.set('accounts', accounts);
@@ -314,8 +328,7 @@ ipcMain.handle('set-proxy', async (_, { accountId, proxy }) => {
   // Apply proxy to account's session partition
   const ses = session.fromPartition(`persist:of-${accountId}`);
   // Unregister old proxy auth if any
-  const oldAcct = accounts[idx];
-  if (oldAcct?.proxy) unregisterProxyAuth(oldAcct.proxy);
+  if (oldProxy) unregisterProxyAuth(oldProxy);
   if (proxy && proxy.enabled && proxy.host && proxy.port) {
     await ses.setProxy({ proxyRules: buildProxyRules(proxy) });
     registerProxyAuth(proxy);
@@ -330,7 +343,6 @@ ipcMain.handle('test-proxy', async (_, { proxy }) => {
   try {
     // Use Node's http module directly with the proxy — more reliable than Electron net.request
     const http = require('http');
-    const url = require('url');
 
     const result = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Connection timed out (15s)')), 15000);
@@ -433,20 +445,12 @@ ipcMain.handle('sync-download', async () => {
   return { success: true, ...result };
 });
 
-ipcMain.handle('sync-debug-cookies', async (_, accountId) => {
-  const ses = session.fromPartition(`persist:of-${accountId}`);
-  const cookies = await ses.cookies.get({ url: 'https://onlyfans.com' });
-  return cookies.map(c => ({ name: c.name, domain: c.domain, value: c.value.substring(0, 20) }));
-});
-
 async function initFirebaseSync() {
   const apiKey = store.get('apiKey');
   if (!apiKey) return;
 
-  // Check if Firebase config is set (not placeholder)
   try {
-    const syncModule = require('./firebase-sync');
-    await syncModule.initSync(store, (status) => {
+    await firebaseSync.initSync(store, (status) => {
       syncStatus = status;
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('sync-update', status);

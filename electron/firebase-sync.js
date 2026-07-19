@@ -11,6 +11,8 @@ let store = null;
 let realtimeUnsubscribe = null;
 let syncStatusCallback = null;
 let lastUploadHashes = new Map(); // accountId -> hash
+let cachedDerivedKey = null; // cache PBKDF2 result
+let cachedKeySource = null; // the API key used to derive
 
 const FIREBASE_CONFIG = {
   apiKey: 'AIzaSyCtweAn8fMiNy0940RclIL1t-LZfcbxMwk',
@@ -25,10 +27,14 @@ const FIREBASE_CONFIG = {
 const SYNC_DIRS = ['Network', 'Local Storage', 'Session Storage'];
 const SYNC_FILES = ['Preferences'];
 const SKIP_FILES = ['LOCK', 'LOG', 'LOG.old'];
+const MAX_RECURSE_DEPTH = 10;
 
 // ============ ENCRYPTION ============
 function deriveKey(apiKey) {
-  return crypto.pbkdf2Sync(apiKey, 'elite-dashboard-sync-salt', 100000, 32, 'sha256');
+  if (cachedDerivedKey && cachedKeySource === apiKey) return cachedDerivedKey;
+  cachedDerivedKey = crypto.pbkdf2Sync(apiKey, 'elite-dashboard-sync-salt', 100000, 32, 'sha256');
+  cachedKeySource = apiKey;
+  return cachedDerivedKey;
 }
 
 function encrypt(data, apiKey) {
@@ -41,6 +47,9 @@ function encrypt(data, apiKey) {
 }
 
 function decrypt(data, apiKey) {
+  if (!Buffer.isBuffer(data) || data.length < 29) {
+    throw new Error('Invalid encrypted data');
+  }
   const key = deriveKey(apiKey);
   const iv = data.subarray(0, 12);
   const authTag = data.subarray(12, 28);
@@ -71,14 +80,12 @@ function packPartition(accountId) {
 
   const files = [];
 
-  // Collect files from sync directories
   for (const dir of SYNC_DIRS) {
     const dirPath = path.join(partDir, dir);
     if (!fs.existsSync(dirPath)) continue;
-    collectFiles(dirPath, dir, files);
+    collectFiles(dirPath, dir, files, 0);
   }
 
-  // Collect individual files
   for (const file of SYNC_FILES) {
     const filePath = path.join(partDir, file);
     if (!fs.existsSync(filePath)) continue;
@@ -95,15 +102,19 @@ function packPartition(accountId) {
   return compressed;
 }
 
-function collectFiles(dirPath, relativeTo, files) {
-  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+function collectFiles(dirPath, relativeTo, files, depth) {
+  if (depth > MAX_RECURSE_DEPTH) return;
+  let entries;
+  try {
+    entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  } catch { return; }
   for (const entry of entries) {
     if (SKIP_FILES.includes(entry.name)) continue;
     const fullPath = path.join(dirPath, entry.name);
     const relPath = path.join(relativeTo, entry.name);
     if (entry.isDirectory()) {
-      collectFiles(fullPath, relPath, files);
-    } else {
+      collectFiles(fullPath, relPath, files, depth + 1);
+    } else if (entry.isFile()) {
       try {
         const data = fs.readFileSync(fullPath);
         files.push({ path: relPath.replace(/\\/g, '/'), data: data.toString('base64') });
@@ -114,18 +125,36 @@ function collectFiles(dirPath, relativeTo, files) {
 
 function unpackPartition(accountId, compressed) {
   const partDir = getPartitionPath(accountId);
+  const resolvedPartDir = path.resolve(partDir);
 
-  const json = zlib.gunzipSync(compressed).toString('utf8');
-  const files = JSON.parse(json);
+  let json, files;
+  try {
+    json = zlib.gunzipSync(compressed).toString('utf8');
+    files = JSON.parse(json);
+  } catch (err) {
+    throw new Error(`Corrupt partition data: ${err.message}`);
+  }
 
+  if (!Array.isArray(files)) throw new Error('Invalid partition format');
+
+  let written = 0;
   for (const file of files) {
-    const filePath = path.join(partDir, ...file.path.split('/'));
+    if (!file.path || typeof file.path !== 'string' || !file.data) continue;
+
+    // Path traversal protection
+    const filePath = path.resolve(partDir, ...file.path.split('/'));
+    if (!filePath.startsWith(resolvedPartDir)) {
+      console.warn(`[Firebase Sync] Skipping unsafe path: ${file.path}`);
+      continue;
+    }
+
     const dir = path.dirname(filePath);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, Buffer.from(file.data, 'base64'));
+    written++;
   }
 
-  console.log(`[Firebase Sync] Unpacked ${files.length} files to partition for ${accountId}`);
+  console.log(`[Firebase Sync] Unpacked ${written} files to partition for ${accountId}`);
 }
 
 // ============ CORE SYNC ============
@@ -139,12 +168,17 @@ async function initSync(electronStore, statusCb) {
     return false;
   }
 
+  // Prevent double-init
+  if (initialized) return true;
+
   try {
-    const { initializeApp } = require('firebase/app');
+    const { initializeApp, getApps } = require('firebase/app');
     const { getFirestore } = require('firebase/firestore');
     const { getAuth, signInAnonymously } = require('firebase/auth');
 
-    firebaseApp = initializeApp(FIREBASE_CONFIG);
+    // Only create app if it doesn't already exist
+    const existingApps = getApps();
+    firebaseApp = existingApps.length > 0 ? existingApps[0] : initializeApp(FIREBASE_CONFIG);
     db = getFirestore(firebaseApp);
     auth = getAuth(firebaseApp);
 
@@ -153,10 +187,7 @@ async function initSync(electronStore, statusCb) {
     initialized = true;
     emitStatus({ connected: true, lastSync: null, accounts: 0 });
 
-    // Initial download only
     await downloadAllSessions();
-
-    // Start real-time listener
     startRealtimeListener();
 
     return true;
@@ -191,30 +222,27 @@ async function uploadSession(accountId, force = false) {
 
   try {
     // Flush session data to disk first
-    const ses = session.fromPartition(`persist:of-${accountId}`);
-    await ses.cookies.flushStore();
+    try {
+      const ses = session.fromPartition(`persist:of-${accountId}`);
+      await ses.cookies.flushStore();
+    } catch {}
 
-    // Small delay to let files settle
-    await new Promise(r => setTimeout(r, 500));
+    await new Promise(r => setTimeout(r, 300));
 
-    // Pack the partition folder
     const packed = packPartition(accountId);
     if (!packed) {
       console.log(`[Firebase Sync] No partition data for ${accountId}`);
       return;
     }
 
-    // Hash for change detection
     const hash = crypto.createHash('sha256').update(packed).digest('hex');
     if (!force && lastUploadHashes.get(accountId) === hash) return;
 
-    // Encrypt
     const encrypted = encrypt(packed, apiKey);
     const b64 = encrypted.toString('base64');
 
-    // Firestore has 1MB doc limit — check size
     if (b64.length > 900000) {
-      console.error(`[Firebase Sync] Partition too large for Firestore (${Math.round(b64.length/1024)}KB)`);
+      console.error(`[Firebase Sync] Partition too large for Firestore (${Math.round(b64.length / 1024)}KB)`);
       return;
     }
 
@@ -230,7 +258,6 @@ async function uploadSession(accountId, force = false) {
 
     lastUploadHashes.set(accountId, hash);
 
-    // Sync account metadata
     const accounts = store.get('accounts') || [];
     const acct = accounts.find((a) => a.id === accountId);
     if (acct) {
@@ -243,7 +270,7 @@ async function uploadSession(accountId, force = false) {
     }
 
     emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: accounts.length });
-    console.log(`[Firebase Sync] Uploaded partition for ${accountId} (${Math.round(b64.length/1024)}KB)`);
+    console.log(`[Firebase Sync] Uploaded partition for ${accountId} (${Math.round(b64.length / 1024)}KB)`);
   } catch (err) {
     console.error(`[Firebase Sync] Upload failed for ${accountId}:`, err.message);
   }
@@ -270,12 +297,10 @@ async function downloadAllSessions(force = false) {
   try {
     const { collection, getDocs } = require('firebase/firestore');
 
-    // Download account list
     const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
     const remoteAccounts = [];
     accountsSnap.forEach((d) => remoteAccounts.push(d.data()));
 
-    // Sync remote accounts to local
     const localAccounts = store.get('accounts') || [];
     let updated = false;
     for (const remote of remoteAccounts) {
@@ -286,7 +311,6 @@ async function downloadAllSessions(force = false) {
     }
     if (updated) store.set('accounts', localAccounts);
 
-    // Download sessions
     const sessionsSnap = await getDocs(collection(db, `teams/${teamId}/sessions`));
     let syncedCount = 0;
 
@@ -294,15 +318,13 @@ async function downloadAllSessions(force = false) {
       const data = docSnap.data();
       const accountId = docSnap.id;
 
-      // Skip own uploads (unless force)
       if (!force && data.updatedBy === machineId) {
         lastUploadHashes.set(accountId, data.partitionHash || '');
         continue;
       }
 
-      // Skip if no partition data (old cookie-based format)
       if (!data.partition) {
-        console.log(`[Firebase Sync] Skipping ${accountId} — no partition data (old format)`);
+        console.log(`[Firebase Sync] Skipping ${accountId} — no partition data`);
         continue;
       }
 
@@ -316,18 +338,15 @@ async function downloadAllSessions(force = false) {
   } catch (err) {
     console.error('[Firebase Sync] Download failed:', err.message);
     emitStatus({ connected: true, lastSync: null, error: err.message });
+    return null;
   }
 }
 
 async function importPartition(accountId, data, apiKey) {
   try {
-    // Decrypt
     const encrypted = Buffer.from(data.partition, 'base64');
     const compressed = decrypt(encrypted, apiKey);
-
-    // Unpack to partition folder
     unpackPartition(accountId, compressed);
-
     lastUploadHashes.set(accountId, data.partitionHash || '');
     emitStatus({ connected: true, lastSync: new Date().toISOString() });
   } catch (err) {
@@ -336,6 +355,8 @@ async function importPartition(accountId, data, apiKey) {
 }
 
 // ============ REAL-TIME LISTENER ============
+let realtimeQueue = Promise.resolve();
+
 function startRealtimeListener() {
   if (!initialized || !db || !store) return;
 
@@ -350,21 +371,22 @@ function startRealtimeListener() {
   realtimeUnsubscribe = onSnapshot(
     collection(db, `teams/${teamId}/sessions`),
     (snapshot) => {
-      snapshot.docChanges().forEach(async (change) => {
-        if (change.type === 'added' || change.type === 'modified') {
-          const data = change.doc.data();
-          const accountId = change.doc.id;
+      for (const change of snapshot.docChanges()) {
+        if (change.type !== 'added' && change.type !== 'modified') continue;
+        const data = change.doc.data();
+        const accountId = change.doc.id;
 
-          if (data.updatedBy === machineId) return;
-          if (!data.partition) return;
+        if (data.updatedBy === machineId) continue;
+        if (!data.partition) continue;
 
-          console.log(`[Firebase Sync] Real-time update for ${accountId}`);
-          await importPartition(accountId, data, apiKey);
+        // Queue sequentially to prevent concurrent file writes
+        realtimeQueue = realtimeQueue.then(async () => {
+          try {
+            console.log(`[Firebase Sync] Real-time update for ${accountId}`);
+            await importPartition(accountId, data, apiKey);
 
-          // Sync account list
-          const localAccounts = store.get('accounts') || [];
-          if (!localAccounts.find((a) => a.id === accountId)) {
-            try {
+            const localAccounts = store.get('accounts') || [];
+            if (!localAccounts.find((a) => a.id === accountId)) {
               const { doc, getDoc } = require('firebase/firestore');
               const acctDoc = await getDoc(doc(db, `teams/${teamId}/accounts`, accountId));
               if (acctDoc.exists()) {
@@ -372,12 +394,14 @@ function startRealtimeListener() {
                 localAccounts.push({ id: acctData.id, name: acctData.name });
                 store.set('accounts', localAccounts);
               }
-            } catch {}
-          }
+            }
 
-          emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: localAccounts.length });
-        }
-      });
+            emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: localAccounts.length });
+          } catch (err) {
+            console.error(`[Firebase Sync] Real-time sync error for ${accountId}:`, err.message);
+          }
+        });
+      }
     },
     (err) => {
       console.error('[Firebase Sync] Listener error:', err.message);
@@ -393,5 +417,4 @@ module.exports = {
   uploadAllSessions,
   downloadAllSessions,
   get isInitialized() { return initialized; },
-  get isImporting() { return false; }, // no longer needed with partition approach
 };
