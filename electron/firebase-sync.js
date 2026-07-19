@@ -87,8 +87,9 @@ async function initSync(electronStore, statusCb) {
     initialized = true;
     emitStatus({ connected: true, lastSync: null, accounts: 0 });
 
-    // Initial download
+    // Initial download then upload
     await downloadAllSessions();
+    await uploadAllSessions();
 
     // Start real-time listener
     startRealtimeListener();
