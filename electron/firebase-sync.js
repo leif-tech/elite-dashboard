@@ -281,6 +281,7 @@ async function importSession(accountId, data, apiKey) {
           url: `https://${cleanDomain}${cookie.path || '/'}`,
           name: cookie.name,
           value: cookie.value,
+          domain: cookie.domain.startsWith('.') ? cookie.domain : cleanDomain,
           path: cookie.path || '/',
           secure: cookie.secure !== false,
           httpOnly: cookie.httpOnly || false,
@@ -297,6 +298,8 @@ async function importSession(accountId, data, apiKey) {
       }
     }
 
+    // Flush cookies to disk so they persist
+    await ses.cookies.flushStore();
     console.log(`[Firebase Sync] Imported ${imported} cookies for ${accountId} (${failed} failed)`);
     // Update local hash so we don't re-upload what we just downloaded
     lastUploadHashes.set(accountId, data.cookieHash);
