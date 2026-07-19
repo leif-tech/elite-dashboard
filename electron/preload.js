@@ -21,6 +21,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   syncStatus: () => ipcRenderer.invoke('sync-status'),
   syncForce: () => ipcRenderer.invoke('sync-force'),
   syncDownload: () => ipcRenderer.invoke('sync-download'),
+  syncUploadAccount: (id) => ipcRenderer.invoke('sync-upload-account', id),
   onSyncUpdate: (callback) => {
     ipcRenderer.removeAllListeners('sync-update');
     ipcRenderer.on('sync-update', (_, status) => callback(status));

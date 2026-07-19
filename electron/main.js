@@ -446,6 +446,12 @@ ipcMain.handle('sync-download', async () => {
   return { success: true, ...result };
 });
 
+// Upload a specific account's session immediately (called on account switch)
+ipcMain.handle('sync-upload-account', async (_, accountId) => {
+  if (!firebaseSync.isInitialized || !accountId) return;
+  await firebaseSync.uploadSession(accountId, false);
+});
+
 async function initFirebaseSync() {
   const apiKey = store.get('apiKey');
   if (!apiKey) return;
@@ -468,8 +474,15 @@ app.whenReady().then(() => {
   // Initialize Firebase sync after window is ready
   initFirebaseSync();
 });
+app.on('before-quit', async (e) => {
+  if (firebaseSync.isInitialized) {
+    e.preventDefault();
+    await firebaseSync.uploadAllSessions(false);
+    firebaseSync.stopSync();
+    app.exit();
+  }
+});
 app.on('window-all-closed', () => {
-  firebaseSync.stopSync();
   app.quit();
 });
 app.on('activate', () => {

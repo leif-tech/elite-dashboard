@@ -7,7 +7,15 @@ import { setApiKey, getApiKey, listAccounts as apiListAccounts } from './api';
 
 export default function App() {
   const [accounts, setAccounts] = useState([]);
-  const [activeId, setActiveId] = useState(null); // null = home, string = account id, __proxy__ / __mass_messages__
+  const [activeId, _setActiveId] = useState(null); // null = home, string = account id, __proxy__ / __mass_messages__
+
+  // Sync previous account's session before switching
+  const setActiveId = (newId) => {
+    if (activeId && activeId.startsWith('acct_') && activeId !== newId) {
+      window.electronAPI.syncUploadAccount(activeId);
+    }
+    _setActiveId(newId);
+  };
   const [adding, setAdding] = useState(false);
   const [editName, setEditName] = useState('');
   const [confirmRemove, setConfirmRemove] = useState(null);

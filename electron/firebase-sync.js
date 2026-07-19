@@ -416,7 +416,7 @@ function startRealtimeListener() {
 }
 
 // ============ AUTO UPLOAD ============
-const AUTO_UPLOAD_INTERVAL = 5 * 60 * 1000; // 5 minutes
+const AUTO_UPLOAD_INTERVAL = 60 * 1000; // 1 minute
 
 function startAutoUpload() {
   if (autoUploadInterval) clearInterval(autoUploadInterval);
