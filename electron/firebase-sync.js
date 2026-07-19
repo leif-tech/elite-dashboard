@@ -236,8 +236,9 @@ async function downloadAllSessions() {
       const data = docSnap.data();
       const accountId = docSnap.id;
 
-      // Skip if we uploaded this ourselves (no need to re-import)
-      if (data.updatedBy === machineId && lastUploadHashes.get(accountId) === data.cookieHash) {
+      // Skip if we uploaded this ourselves (no need to re-import our own cookies)
+      if (data.updatedBy === machineId) {
+        lastUploadHashes.set(accountId, data.cookieHash);
         continue;
       }
 
@@ -329,7 +330,7 @@ function startRealtimeListener() {
           const accountId = change.doc.id;
 
           // Skip our own updates
-          if (data.updatedBy === machineId && lastUploadHashes.get(accountId) === data.cookieHash) {
+          if (data.updatedBy === machineId) {
             return;
           }
 
