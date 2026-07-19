@@ -261,31 +261,43 @@ async function importSession(accountId, data, apiKey) {
 
     const ses = session.fromPartition(`persist:of-${accountId}`);
     const now = Date.now() / 1000;
+    let imported = 0;
+    let failed = 0;
 
     for (const cookie of cookies) {
       // Skip expired
       if (cookie.expirationDate && cookie.expirationDate < now) continue;
 
       try {
+        // Normalize sameSite — Electron expects: unspecified, no_restriction, lax, strict
+        let sameSite = (cookie.sameSite || 'no_restriction').toLowerCase();
+        if (sameSite === 'none') sameSite = 'no_restriction';
+        if (!['unspecified', 'no_restriction', 'lax', 'strict'].includes(sameSite)) {
+          sameSite = 'no_restriction';
+        }
+
+        const cleanDomain = cookie.domain.replace(/^\./, '');
         const cookieDetails = {
-          url: `https://${cookie.domain.replace(/^\./, '')}${cookie.path || '/'}`,
+          url: `https://${cleanDomain}${cookie.path || '/'}`,
           name: cookie.name,
           value: cookie.value,
-          domain: cookie.domain,
           path: cookie.path || '/',
           secure: cookie.secure !== false,
           httpOnly: cookie.httpOnly || false,
-          sameSite: cookie.sameSite || 'no_restriction',
+          sameSite,
         };
         if (cookie.expirationDate) {
           cookieDetails.expirationDate = cookie.expirationDate;
         }
         await ses.cookies.set(cookieDetails);
+        imported++;
       } catch (e) {
-        // Some cookies may fail to set (invalid domain, etc.) — skip
+        failed++;
+        if (failed <= 3) console.warn(`[Firebase Sync] Cookie set failed: ${cookie.name} — ${e.message}`);
       }
     }
 
+    console.log(`[Firebase Sync] Imported ${imported} cookies for ${accountId} (${failed} failed)`);
     // Update local hash so we don't re-upload what we just downloaded
     lastUploadHashes.set(accountId, data.cookieHash);
   } catch (err) {
