@@ -663,23 +663,32 @@ async function factoryReset() {
       if (apiKey) {
         const teamId = getTeamId(apiKey);
         const { collection, getDocs, deleteDoc, doc } = require('firebase/firestore');
-        const sessionsSnap = await getDocs(collection(db, `teams/${teamId}/sessions`));
-        for (const d of sessionsSnap.docs) {
-          await deleteDoc(doc(db, `teams/${teamId}/sessions`, d.id));
-        }
-        const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
-        for (const d of accountsSnap.docs) {
-          await deleteDoc(doc(db, `teams/${teamId}/accounts`, d.id));
+        try {
+          const sessionsSnap = await getDocs(collection(db, `teams/${teamId}/sessions`));
+          for (const d of sessionsSnap.docs) {
+            await deleteDoc(doc(db, `teams/${teamId}/sessions`, d.id));
+          }
+          const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
+          for (const d of accountsSnap.docs) {
+            await deleteDoc(doc(db, `teams/${teamId}/accounts`, d.id));
+          }
+        } catch (e) {
+          console.error('[Firebase Sync] Firestore wipe error:', e.message);
         }
       }
     }
 
-    // 2. Clear cookies from all partitions
+    // 2. Clear cookies from all partitions (use cookies.remove — doesn't hang like clearStorageData)
     const accounts = store ? (store.get('accounts') || []) : [];
     for (const acct of accounts) {
       try {
         const ses = session.fromPartition(`persist:of-${acct.id}`);
-        await ses.clearStorageData();
+        const cookies = await ses.cookies.get({});
+        for (const c of cookies) {
+          const url = `https://${(c.domain || '').replace(/^\./, '')}${c.path || '/'}`;
+          await ses.cookies.remove(url, c.name);
+        }
+        await ses.cookies.flushStore();
       } catch {}
     }
 
@@ -688,18 +697,7 @@ async function factoryReset() {
       store.set('accounts', []);
     }
 
-    // 4. Delete partition directories from disk
-    const partitionsDir = path.join(app.getPath('userData'), 'Partitions');
-    if (fs.existsSync(partitionsDir)) {
-      const entries = fs.readdirSync(partitionsDir);
-      for (const entry of entries) {
-        if (entry === 'default') continue; // keep default partition
-        const dirPath = path.join(partitionsDir, entry);
-        try { fs.rmSync(dirPath, { recursive: true, force: true }); } catch {}
-      }
-    }
-
-    // 5. Clear local sync state
+    // 4. Clear local sync state
     lastUploadHashes.clear();
     locallyOwnedSessions.clear();
 
