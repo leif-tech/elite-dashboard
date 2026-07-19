@@ -40,8 +40,6 @@ let mainWindow;
 const activePopups = new Map();
 // Runtime map: proxy host:port -> { username, password }
 const proxyCredentials = new Map();
-// Track which partitions have cookie listeners
-const cookieListeners = new Set();
 
 function spoofHeaders(ses) {
   ses.webRequest.onBeforeSendHeaders((details, callback) => {
@@ -171,10 +169,6 @@ function createWindow() {
 
     const prefs = wvContents.getLastWebPreferences();
     const partition = prefs?.partition || 'persist:default';
-
-    // Register cookie sync listener for this partition
-    const partMatch = partition.match(/^persist:of-(.+)$/);
-    if (partMatch) registerCookieListener(partMatch[1]);
 
     const wvSession = session.fromPartition(partition);
     spoofHeaders(wvSession);
@@ -445,32 +439,6 @@ ipcMain.handle('sync-debug-cookies', async (_, accountId) => {
   return cookies.map(c => ({ name: c.name, domain: c.domain, value: c.value.substring(0, 20) }));
 });
 
-// Register cookie-changed listener for an account's partition
-function registerCookieListener(accountId) {
-  const partitionName = `persist:of-${accountId}`;
-  if (cookieListeners.has(partitionName)) return;
-  cookieListeners.add(partitionName);
-
-  const ses = session.fromPartition(partitionName);
-  ses.cookies.on('changed', (_event, cookie, _cause, removed) => {
-    // Skip during import to prevent upload loop
-    if (firebaseSync.isImporting) return;
-    // Only care about onlyfans.com cookies being set (not removed)
-    if (removed) return;
-    const domain = cookie.domain || '';
-    if (!domain.includes('onlyfans.com')) return;
-
-    // Debounce: upload after a short delay
-    if (!registerCookieListener._timers) registerCookieListener._timers = {};
-    clearTimeout(registerCookieListener._timers[accountId]);
-    registerCookieListener._timers[accountId] = setTimeout(() => {
-      if (firebaseSync.isInitialized && !firebaseSync.isImporting) {
-        firebaseSync.uploadSession(accountId).catch(() => {});
-      }
-    }, 5000); // 5s debounce
-  });
-}
-
 async function initFirebaseSync() {
   const apiKey = store.get('apiKey');
   if (!apiKey) return;
@@ -484,12 +452,6 @@ async function initFirebaseSync() {
         mainWindow.webContents.send('sync-update', status);
       }
     });
-
-    // Register cookie listeners for all existing accounts
-    const accounts = store.get('accounts') || [];
-    for (const acct of accounts) {
-      registerCookieListener(acct.id);
-    }
   } catch (err) {
     console.error('[Sync] Failed to init:', err.message);
   }

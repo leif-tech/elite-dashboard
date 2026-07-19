@@ -1,18 +1,17 @@
-const { session } = require('electron');
+const { app, session } = require('electron');
 const crypto = require('crypto');
+const fs = require('fs');
+const path = require('path');
+const zlib = require('zlib');
 
 // Firebase SDK (modular)
 let firebaseApp, db, auth;
 let initialized = false;
 let store = null;
 let realtimeUnsubscribe = null;
-let uploadInterval = null;
 let syncStatusCallback = null;
 let lastUploadHashes = new Map(); // accountId -> hash
-let isImporting = false; // flag to suppress cookie-changed during import
 
-// ============ FIREBASE CONFIG ============
-// Replace with your Firebase project config (one-time setup)
 const FIREBASE_CONFIG = {
   apiKey: 'AIzaSyCtweAn8fMiNy0940RclIL1t-LZfcbxMwk',
   authDomain: 'elite-228d6.firebaseapp.com',
@@ -22,43 +21,111 @@ const FIREBASE_CONFIG = {
   appId: '1:367015080565:web:edadcef1bcda99ce4b7e3c',
 };
 
+// Folders/files to sync from partition (skip caches)
+const SYNC_DIRS = ['Network', 'Local Storage', 'Session Storage'];
+const SYNC_FILES = ['Preferences'];
+const SKIP_FILES = ['LOCK', 'LOG', 'LOG.old'];
+
 // ============ ENCRYPTION ============
 function deriveKey(apiKey) {
-  // PBKDF2 with API key as password, fixed salt (both machines share same key)
   return crypto.pbkdf2Sync(apiKey, 'elite-dashboard-sync-salt', 100000, 32, 'sha256');
 }
 
-function encrypt(plaintext, apiKey) {
+function encrypt(data, apiKey) {
   const key = deriveKey(apiKey);
   const iv = crypto.randomBytes(12);
   const cipher = crypto.createCipheriv('aes-256-gcm', key, iv);
-  let encrypted = cipher.update(plaintext, 'utf8', 'base64');
-  encrypted += cipher.final('base64');
+  const encrypted = Buffer.concat([cipher.update(data), cipher.final()]);
   const authTag = cipher.getAuthTag();
-  // Format: iv:authTag:ciphertext (all base64)
-  return `${iv.toString('base64')}:${authTag.toString('base64')}:${encrypted}`;
+  return Buffer.concat([iv, authTag, encrypted]);
 }
 
-function decrypt(encryptedStr, apiKey) {
+function decrypt(data, apiKey) {
   const key = deriveKey(apiKey);
-  const parts = encryptedStr.split(':');
-  if (parts.length !== 3) throw new Error('Invalid encrypted format');
-  const iv = Buffer.from(parts[0], 'base64');
-  const authTag = Buffer.from(parts[1], 'base64');
-  const ciphertext = parts[2];
+  const iv = data.subarray(0, 12);
+  const authTag = data.subarray(12, 28);
+  const ciphertext = data.subarray(28);
   const decipher = crypto.createDecipheriv('aes-256-gcm', key, iv);
   decipher.setAuthTag(authTag);
-  let decrypted = decipher.update(ciphertext, 'base64', 'utf8');
-  decrypted += decipher.final('utf8');
-  return decrypted;
-}
-
-function hashCookies(cookies) {
-  return crypto.createHash('sha256').update(JSON.stringify(cookies)).digest('hex');
+  return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
 }
 
 function getTeamId(apiKey) {
   return crypto.createHash('sha256').update(apiKey).digest('hex').slice(0, 16);
+}
+
+function getMachineId() {
+  const os = require('os');
+  const raw = `${os.hostname()}-${os.userInfo().username}-${os.platform()}`;
+  return crypto.createHash('md5').update(raw).digest('hex').slice(0, 12);
+}
+
+function getPartitionPath(accountId) {
+  return path.join(app.getPath('userData'), 'Partitions', `of-${accountId}`);
+}
+
+// ============ PARTITION FOLDER PACKING ============
+function packPartition(accountId) {
+  const partDir = getPartitionPath(accountId);
+  if (!fs.existsSync(partDir)) return null;
+
+  const files = [];
+
+  // Collect files from sync directories
+  for (const dir of SYNC_DIRS) {
+    const dirPath = path.join(partDir, dir);
+    if (!fs.existsSync(dirPath)) continue;
+    collectFiles(dirPath, dir, files);
+  }
+
+  // Collect individual files
+  for (const file of SYNC_FILES) {
+    const filePath = path.join(partDir, file);
+    if (!fs.existsSync(filePath)) continue;
+    try {
+      const data = fs.readFileSync(filePath);
+      files.push({ path: file, data: data.toString('base64') });
+    } catch {}
+  }
+
+  if (files.length === 0) return null;
+
+  const json = JSON.stringify(files);
+  const compressed = zlib.gzipSync(Buffer.from(json, 'utf8'));
+  return compressed;
+}
+
+function collectFiles(dirPath, relativeTo, files) {
+  const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+  for (const entry of entries) {
+    if (SKIP_FILES.includes(entry.name)) continue;
+    const fullPath = path.join(dirPath, entry.name);
+    const relPath = path.join(relativeTo, entry.name);
+    if (entry.isDirectory()) {
+      collectFiles(fullPath, relPath, files);
+    } else {
+      try {
+        const data = fs.readFileSync(fullPath);
+        files.push({ path: relPath.replace(/\\/g, '/'), data: data.toString('base64') });
+      } catch {}
+    }
+  }
+}
+
+function unpackPartition(accountId, compressed) {
+  const partDir = getPartitionPath(accountId);
+
+  const json = zlib.gunzipSync(compressed).toString('utf8');
+  const files = JSON.parse(json);
+
+  for (const file of files) {
+    const filePath = path.join(partDir, ...file.path.split('/'));
+    const dir = path.dirname(filePath);
+    fs.mkdirSync(dir, { recursive: true });
+    fs.writeFileSync(filePath, Buffer.from(file.data, 'base64'));
+  }
+
+  console.log(`[Firebase Sync] Unpacked ${files.length} files to partition for ${accountId}`);
 }
 
 // ============ CORE SYNC ============
@@ -73,7 +140,6 @@ async function initSync(electronStore, statusCb) {
   }
 
   try {
-    // Dynamic import firebase
     const { initializeApp } = require('firebase/app');
     const { getFirestore } = require('firebase/firestore');
     const { getAuth, signInAnonymously } = require('firebase/auth');
@@ -82,21 +148,16 @@ async function initSync(electronStore, statusCb) {
     db = getFirestore(firebaseApp);
     auth = getAuth(firebaseApp);
 
-    // Anonymous auth
     await signInAnonymously(auth);
 
     initialized = true;
     emitStatus({ connected: true, lastSync: null, accounts: 0 });
 
-    // Initial download only — don't auto-upload on startup
-    // Uploads happen via: cookie-changed listener, periodic interval, or Force Upload
+    // Initial download only
     await downloadAllSessions();
 
     // Start real-time listener
     startRealtimeListener();
-
-    // Periodic upload every 3 minutes (skips if cookies unchanged via hash check)
-    uploadInterval = setInterval(() => uploadAllSessions(), 3 * 60 * 1000);
 
     return true;
   } catch (err) {
@@ -110,10 +171,6 @@ function stopSync() {
   if (realtimeUnsubscribe) {
     realtimeUnsubscribe();
     realtimeUnsubscribe = null;
-  }
-  if (uploadInterval) {
-    clearInterval(uploadInterval);
-    uploadInterval = null;
   }
   initialized = false;
   emitStatus({ connected: false });
@@ -131,67 +188,49 @@ async function uploadSession(accountId, force = false) {
   if (!apiKey) return;
 
   const teamId = getTeamId(apiKey);
-  const ses = session.fromPartition(`persist:of-${accountId}`);
 
   try {
-    // Get all cookies that would be sent to onlyfans.com
-    const allCookies = await ses.cookies.get({ url: 'https://onlyfans.com' });
+    // Flush session data to disk first
+    const ses = session.fromPartition(`persist:of-${accountId}`);
+    await ses.cookies.flushStore();
 
-    // Deduplicate by name+path — prefer host-only over domain cookies
-    const cookieMap = new Map();
-    for (const c of allCookies) {
-      const key = `${c.name}|${c.path}`;
-      const existing = cookieMap.get(key);
-      if (!existing) {
-        cookieMap.set(key, c);
-      } else if (!c.domain.startsWith('.') && existing.domain.startsWith('.')) {
-        // Prefer host-only (no dot) over domain cookie (dot)
-        cookieMap.set(key, c);
-      }
+    // Small delay to let files settle
+    await new Promise(r => setTimeout(r, 500));
+
+    // Pack the partition folder
+    const packed = packPartition(accountId);
+    if (!packed) {
+      console.log(`[Firebase Sync] No partition data for ${accountId}`);
+      return;
     }
 
-    // Filter expired cookies
-    const now = Date.now() / 1000;
-    const cookies = [...cookieMap.values()].filter((c) => {
-      if (c.expirationDate && c.expirationDate < now) return false;
-      return true;
-    });
+    // Hash for change detection
+    const hash = crypto.createHash('sha256').update(packed).digest('hex');
+    if (!force && lastUploadHashes.get(accountId) === hash) return;
 
-    if (cookies.length === 0) return;
+    // Encrypt
+    const encrypted = encrypt(packed, apiKey);
+    const b64 = encrypted.toString('base64');
 
-    // Clean up: remove domain-duplicate cookies from partition
-    if (force) {
-      const allForClean = await ses.cookies.get({ url: 'https://onlyfans.com' });
-      const hostOnlyNames = new Set(cookies.filter(c => !c.domain.startsWith('.')).map(c => c.name));
-      for (const c of allForClean) {
-        if (c.domain.startsWith('.') && hostOnlyNames.has(c.name)) {
-          try {
-            await ses.cookies.remove(`https://${c.domain.replace(/^\./, '')}${c.path}`, c.name);
-          } catch {}
-        }
-      }
-      await ses.cookies.flushStore();
+    // Firestore has 1MB doc limit — check size
+    if (b64.length > 900000) {
+      console.error(`[Firebase Sync] Partition too large for Firestore (${Math.round(b64.length/1024)}KB)`);
+      return;
     }
 
-    // Check if changed (skip if force)
-    const hash = hashCookies(cookies);
-    if (!force && lastUploadHashes.get(accountId) === hash) return; // No change
-
-    // Encrypt and upload
-    const encrypted = encrypt(JSON.stringify(cookies), apiKey);
     const { doc, setDoc } = require('firebase/firestore');
-
     const machineId = getMachineId();
+
     await setDoc(doc(db, `teams/${teamId}/sessions`, accountId), {
-      cookies: encrypted,
-      cookieHash: hash,
+      partition: b64,
+      partitionHash: hash,
       updatedAt: Date.now(),
       updatedBy: machineId,
     });
 
     lastUploadHashes.set(accountId, hash);
 
-    // Also sync account metadata
+    // Sync account metadata
     const accounts = store.get('accounts') || [];
     const acct = accounts.find((a) => a.id === accountId);
     if (acct) {
@@ -204,7 +243,7 @@ async function uploadSession(accountId, force = false) {
     }
 
     emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: accounts.length });
-    console.log(`[Firebase Sync] Uploaded session for ${accountId} (${cookies.length} cookies)`);
+    console.log(`[Firebase Sync] Uploaded partition for ${accountId} (${Math.round(b64.length/1024)}KB)`);
   } catch (err) {
     console.error(`[Firebase Sync] Upload failed for ${accountId}:`, err.message);
   }
@@ -234,9 +273,9 @@ async function downloadAllSessions(force = false) {
     // Download account list
     const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
     const remoteAccounts = [];
-    accountsSnap.forEach((doc) => remoteAccounts.push(doc.data()));
+    accountsSnap.forEach((d) => remoteAccounts.push(d.data()));
 
-    // Sync remote accounts to local (add missing ones)
+    // Sync remote accounts to local
     const localAccounts = store.get('accounts') || [];
     let updated = false;
     for (const remote of remoteAccounts) {
@@ -255,13 +294,19 @@ async function downloadAllSessions(force = false) {
       const data = docSnap.data();
       const accountId = docSnap.id;
 
-      // Skip if we uploaded this ourselves (unless force download)
+      // Skip own uploads (unless force)
       if (!force && data.updatedBy === machineId) {
-        lastUploadHashes.set(accountId, data.cookieHash);
+        lastUploadHashes.set(accountId, data.partitionHash || '');
         continue;
       }
 
-      await importSession(accountId, data, apiKey);
+      // Skip if no partition data (old cookie-based format)
+      if (!data.partition) {
+        console.log(`[Firebase Sync] Skipping ${accountId} — no partition data (old format)`);
+        continue;
+      }
+
+      await importPartition(accountId, data, apiKey);
       syncedCount++;
     }
 
@@ -274,81 +319,18 @@ async function downloadAllSessions(force = false) {
   }
 }
 
-async function importSession(accountId, data, apiKey) {
+async function importPartition(accountId, data, apiKey) {
   try {
-    isImporting = true;
-    const decrypted = decrypt(data.cookies, apiKey);
-    const cookies = JSON.parse(decrypted);
+    // Decrypt
+    const encrypted = Buffer.from(data.partition, 'base64');
+    const compressed = decrypt(encrypted, apiKey);
 
-    const ses = session.fromPartition(`persist:of-${accountId}`);
+    // Unpack to partition folder
+    unpackPartition(accountId, compressed);
 
-    // Clear existing OF cookies first to prevent duplicates
-    const existing = await ses.cookies.get({ url: 'https://onlyfans.com' });
-    for (const c of existing) {
-      try {
-        const proto = c.secure ? 'https' : 'http';
-        await ses.cookies.remove(`${proto}://${c.domain.replace(/^\./, '')}${c.path}`, c.name);
-      } catch {}
-    }
-
-    const now = Date.now() / 1000;
-    let imported = 0;
-    let failed = 0;
-
-    for (const cookie of cookies) {
-      // Skip expired
-      if (cookie.expirationDate && cookie.expirationDate < now) continue;
-
-      try {
-        // Normalize sameSite — Electron expects: unspecified, no_restriction, lax, strict
-        let sameSite = (cookie.sameSite || 'no_restriction').toLowerCase();
-        if (sameSite === 'none') sameSite = 'no_restriction';
-        if (!['unspecified', 'no_restriction', 'lax', 'strict'].includes(sameSite)) {
-          sameSite = 'no_restriction';
-        }
-
-        const cleanDomain = cookie.domain.replace(/^\./, '');
-        const cookieDetails = {
-          url: `https://${cleanDomain}${cookie.path || '/'}`,
-          name: cookie.name,
-          value: cookie.value,
-          path: cookie.path || '/',
-          secure: cookie.secure !== false,
-          httpOnly: cookie.httpOnly || false,
-          sameSite,
-        };
-        // Only pass domain for subdomain cookies (dot-prefixed)
-        // Host-only cookies (no dot) must NOT have domain — Electron derives from URL
-        if (cookie.domain.startsWith('.')) {
-          cookieDetails.domain = cookie.domain;
-        }
-        if (cookie.expirationDate) {
-          cookieDetails.expirationDate = cookie.expirationDate;
-        }
-        await ses.cookies.set(cookieDetails);
-        imported++;
-      } catch (e) {
-        failed++;
-        if (failed <= 3) console.warn(`[Firebase Sync] Cookie set failed: ${cookie.name} — ${e.message}`);
-      }
-    }
-
-    // Flush cookies to disk so they persist
-    await ses.cookies.flushStore();
-    console.log(`[Firebase Sync] Imported ${imported} cookies for ${accountId} (${failed} failed)`);
-
-    // Verify cookies were actually set
-    const verify = await ses.cookies.get({ url: 'https://onlyfans.com' });
-    console.log(`[Firebase Sync] Verify: ${verify.length} cookies now in partition for onlyfans.com`);
-    for (const c of verify) {
-      console.log(`  ${c.name} | ${c.domain} | hostOnly=${!c.domain.startsWith('.')} | value=${c.value.substring(0, 15)}...`);
-    }
-
-    // Update local hash so we don't re-upload what we just downloaded
-    lastUploadHashes.set(accountId, data.cookieHash);
-    isImporting = false;
+    lastUploadHashes.set(accountId, data.partitionHash || '');
+    emitStatus({ connected: true, lastSync: new Date().toISOString() });
   } catch (err) {
-    isImporting = false;
     console.error(`[Firebase Sync] Import failed for ${accountId}:`, err.message);
   }
 }
@@ -373,18 +355,15 @@ function startRealtimeListener() {
           const data = change.doc.data();
           const accountId = change.doc.id;
 
-          // Skip our own updates
-          if (data.updatedBy === machineId) {
-            return;
-          }
+          if (data.updatedBy === machineId) return;
+          if (!data.partition) return;
 
           console.log(`[Firebase Sync] Real-time update for ${accountId}`);
-          await importSession(accountId, data, apiKey);
+          await importPartition(accountId, data, apiKey);
 
-          // Sync account list too
+          // Sync account list
           const localAccounts = store.get('accounts') || [];
           if (!localAccounts.find((a) => a.id === accountId)) {
-            // Fetch account metadata
             try {
               const { doc, getDoc } = require('firebase/firestore');
               const acctDoc = await getDoc(doc(db, `teams/${teamId}/accounts`, accountId));
@@ -402,16 +381,8 @@ function startRealtimeListener() {
     },
     (err) => {
       console.error('[Firebase Sync] Listener error:', err.message);
-      emitStatus({ connected: true, error: err.message });
     }
   );
-}
-
-// ============ HELPERS ============
-function getMachineId() {
-  const os = require('os');
-  const raw = `${os.hostname()}-${os.userInfo().username}-${os.platform()}`;
-  return crypto.createHash('md5').update(raw).digest('hex').slice(0, 12);
 }
 
 // ============ EXPORTS ============
@@ -422,5 +393,5 @@ module.exports = {
   uploadAllSessions,
   downloadAllSessions,
   get isInitialized() { return initialized; },
-  get isImporting() { return isImporting; },
+  get isImporting() { return false; }, // no longer needed with partition approach
 };
