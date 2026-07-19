@@ -24,8 +24,8 @@ const FIREBASE_CONFIG = {
   appId: '1:367015080565:web:edadcef1bcda99ce4b7e3c',
 };
 
-// Folders/files to sync from partition (skip caches)
-const SYNC_DIRS = ['Network', 'Local Storage', 'Session Storage'];
+// Folders/files to sync from partition (skip Network — cookies handled via API)
+const SYNC_DIRS = ['Local Storage', 'Session Storage'];
 const SYNC_FILES = ['Preferences'];
 const SKIP_FILES = ['LOCK', 'LOG', 'LOG.old'];
 const MAX_RECURSE_DEPTH = 10;
@@ -74,7 +74,7 @@ function getPartitionPath(accountId) {
   return path.join(app.getPath('userData'), 'Partitions', `of-${accountId}`);
 }
 
-// ============ PARTITION FOLDER PACKING ============
+// ============ PARTITION FOLDER PACKING (Local Storage + Session Storage only) ============
 function packPartition(accountId) {
   const partDir = getPartitionPath(accountId);
   if (!fs.existsSync(partDir)) return null;
@@ -158,6 +158,40 @@ function unpackPartition(accountId, compressed) {
   console.log(`[Firebase Sync] Unpacked ${written} files to partition for ${accountId}`);
 }
 
+// ============ COOKIES API (cross-platform) ============
+async function exportCookies(accountId) {
+  const ses = session.fromPartition(`persist:of-${accountId}`);
+  const cookies = await ses.cookies.get({});
+  // Only sync essential cookie fields (strip Electron internals)
+  return cookies.map(c => ({
+    url: `https://${c.domain.replace(/^\./, '')}${c.path}`,
+    name: c.name,
+    value: c.value,
+    domain: c.domain,
+    path: c.path,
+    secure: c.secure,
+    httpOnly: c.httpOnly,
+    expirationDate: c.expirationDate,
+    sameSite: c.sameSite || 'unspecified',
+  }));
+}
+
+async function importCookies(accountId, cookies) {
+  if (!Array.isArray(cookies) || cookies.length === 0) return;
+  const ses = session.fromPartition(`persist:of-${accountId}`);
+  // Clear existing cookies first to avoid stale duplicates
+  await ses.cookies.flushStore();
+  let imported = 0;
+  for (const cookie of cookies) {
+    try {
+      await ses.cookies.set(cookie);
+      imported++;
+    } catch {}
+  }
+  await ses.cookies.flushStore();
+  console.log(`[Firebase Sync] Imported ${imported}/${cookies.length} cookies for ${accountId}`);
+}
+
 // ============ CORE SYNC ============
 async function initSync(electronStore, statusCb) {
   store = electronStore;
@@ -235,20 +269,30 @@ async function uploadSession(accountId, force = false) {
 
     await new Promise(r => setTimeout(r, 300));
 
+    // Export cookies via API (cross-platform, decrypted)
+    const cookies = await exportCookies(accountId);
+
+    // Pack local/session storage files
     const packed = packPartition(accountId);
-    if (!packed) {
-      console.log(`[Firebase Sync] No partition data for ${accountId}`);
+
+    if (!packed && cookies.length === 0) {
+      console.log(`[Firebase Sync] No data for ${accountId}`);
       return;
     }
 
-    const hash = crypto.createHash('sha256').update(packed).digest('hex');
+    // Build payload and hash
+    const payload = { cookies, partition: packed ? packed.toString('base64') : null };
+    const payloadStr = JSON.stringify(payload);
+    const hash = crypto.createHash('sha256').update(payloadStr).digest('hex');
     if (!force && lastUploadHashes.get(accountId) === hash) return;
 
-    const encrypted = encrypt(packed, apiKey);
+    // Encrypt the full payload
+    const compressed = zlib.gzipSync(Buffer.from(payloadStr, 'utf8'));
+    const encrypted = encrypt(compressed, apiKey);
     const b64 = encrypted.toString('base64');
 
     if (b64.length > 900000) {
-      console.error(`[Firebase Sync] Partition too large for Firestore (${Math.round(b64.length / 1024)}KB)`);
+      console.error(`[Firebase Sync] Data too large for Firestore (${Math.round(b64.length / 1024)}KB)`);
       return;
     }
 
@@ -256,8 +300,9 @@ async function uploadSession(accountId, force = false) {
     const machineId = getMachineId();
 
     await setDoc(doc(db, `teams/${teamId}/sessions`, accountId), {
-      partition: b64,
-      partitionHash: hash,
+      data: b64,
+      dataHash: hash,
+      version: 2, // v2 = cookies via API + partition files
       updatedAt: Date.now(),
       updatedBy: machineId,
     });
@@ -276,7 +321,7 @@ async function uploadSession(accountId, force = false) {
     }
 
     emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: accounts.length });
-    console.log(`[Firebase Sync] Uploaded partition for ${accountId} (${Math.round(b64.length / 1024)}KB)`);
+    console.log(`[Firebase Sync] Uploaded ${cookies.length} cookies + partition for ${accountId} (${Math.round(b64.length / 1024)}KB)`);
   } catch (err) {
     console.error(`[Firebase Sync] Upload failed for ${accountId}:`, err.message);
   }
@@ -325,16 +370,11 @@ async function downloadAllSessions(force = false) {
       const accountId = docSnap.id;
 
       if (!force && data.updatedBy === machineId) {
-        lastUploadHashes.set(accountId, data.partitionHash || '');
+        lastUploadHashes.set(accountId, data.dataHash || data.partitionHash || '');
         continue;
       }
 
-      if (!data.partition) {
-        console.log(`[Firebase Sync] Skipping ${accountId} — no partition data`);
-        continue;
-      }
-
-      await importPartition(accountId, data, apiKey);
+      await importSession(accountId, data, apiKey);
       syncedCount++;
     }
 
@@ -348,12 +388,35 @@ async function downloadAllSessions(force = false) {
   }
 }
 
-async function importPartition(accountId, data, apiKey) {
+async function importSession(accountId, data, apiKey) {
   try {
-    const encrypted = Buffer.from(data.partition, 'base64');
-    const compressed = decrypt(encrypted, apiKey);
-    unpackPartition(accountId, compressed);
-    lastUploadHashes.set(accountId, data.partitionHash || '');
+    if (data.version === 2 && data.data) {
+      // v2 format: cookies via API + partition files
+      const encrypted = Buffer.from(data.data, 'base64');
+      const compressed = decrypt(encrypted, apiKey);
+      const json = zlib.gunzipSync(compressed).toString('utf8');
+      const payload = JSON.parse(json);
+
+      // Import cookies via Electron API (cross-platform)
+      if (payload.cookies) {
+        await importCookies(accountId, payload.cookies);
+      }
+
+      // Unpack local/session storage files
+      if (payload.partition) {
+        const partBuf = Buffer.from(payload.partition, 'base64');
+        unpackPartition(accountId, partBuf);
+      }
+
+      lastUploadHashes.set(accountId, data.dataHash || '');
+    } else if (data.partition) {
+      // v1 format (legacy): raw partition files including Network
+      const encrypted = Buffer.from(data.partition, 'base64');
+      const compressed = decrypt(encrypted, apiKey);
+      unpackPartition(accountId, compressed);
+      lastUploadHashes.set(accountId, data.partitionHash || '');
+    }
+
     emitStatus({ connected: true, lastSync: new Date().toISOString() });
   } catch (err) {
     console.error(`[Firebase Sync] Import failed for ${accountId}:`, err.message);
@@ -383,13 +446,13 @@ function startRealtimeListener() {
         const accountId = change.doc.id;
 
         if (data.updatedBy === machineId) continue;
-        if (!data.partition) continue;
+        if (!data.data && !data.partition) continue;
 
         // Queue sequentially to prevent concurrent file writes
         realtimeQueue = realtimeQueue.then(async () => {
           try {
             console.log(`[Firebase Sync] Real-time update for ${accountId}`);
-            await importPartition(accountId, data, apiKey);
+            await importSession(accountId, data, apiKey);
 
             const localAccounts = store.get('accounts') || [];
             if (!localAccounts.find((a) => a.id === accountId)) {
