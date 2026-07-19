@@ -97,7 +97,7 @@ export default function App() {
       return <HomeView accounts={accounts} onSelect={setActiveId} onAdd={() => setAdding(true)} apiKeySet={apiKeySet} apiAccounts={apiAccounts} onApiKeyConnect={loadApiAccounts} syncStatus={syncStatus} />;
     }
     const acct = accounts.find((a) => a.id === activeId);
-    return <OFWebview key={`${activeId}-${syncReady}`} accountId={activeId} proxy={acct?.proxy} onToggleProxy={() => toggleProxy(activeId)} />;
+    return <OFWebview key={activeId} accountId={activeId} proxy={acct?.proxy} onToggleProxy={() => toggleProxy(activeId)} />;
   };
 
   return (

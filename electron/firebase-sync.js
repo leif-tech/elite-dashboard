@@ -464,7 +464,20 @@ async function downloadAllSessions(force = false) {
 
       if (!force && data.updatedBy === machineId) {
         lastUploadHashes.set(accountId, data.dataHash || data.partitionHash || '');
+        locallyOwnedSessions.add(accountId);
         continue;
+      }
+
+      // Skip import if session already has cookies locally (user already logged in)
+      if (!force) {
+        const ses = session.fromPartition(`persist:of-${accountId}`);
+        const localCookies = await ses.cookies.get({});
+        if (localCookies.length > 0) {
+          console.log(`[Firebase Sync] Skipping download for ${accountId} — already has ${localCookies.length} local cookies`);
+          locallyOwnedSessions.add(accountId);
+          lastUploadHashes.set(accountId, data.dataHash || data.partitionHash || '');
+          continue;
+        }
       }
 
       await importSession(accountId, data, apiKey);
