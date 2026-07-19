@@ -333,13 +333,13 @@ function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyC
                     <img src={acct.avatar} className="w-10 h-10 rounded-full object-cover" alt="" />
                   ) : (
                     <div className="w-10 h-10 rounded-full bg-accent/20 flex items-center justify-center text-sm font-bold text-accent">
-                      {(acct.name || acct.username || '?')[0].toUpperCase()}
+                      {(acct.display_name || acct.onlyfans_username || '?')[0].toUpperCase()}
                     </div>
                   )}
                   <div className="min-w-0">
-                    <p className="text-sm font-medium truncate">{acct.name || acct.username}</p>
-                    {acct.username && acct.name && (
-                      <p className="text-xs text-gray-500 truncate">@{acct.username}</p>
+                    <p className="text-sm font-medium truncate">{acct.display_name || acct.onlyfans_username || acct.id}</p>
+                    {acct.onlyfans_username && (
+                      <p className="text-xs text-gray-500 truncate">@{acct.onlyfans_username}</p>
                     )}
                   </div>
                   <div className="ml-auto">
