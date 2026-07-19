@@ -171,12 +171,6 @@ function createWindow() {
     const prefs = wvContents.getLastWebPreferences();
     const partition = prefs?.partition || 'persist:default';
 
-    // Mark this session as locally owned — prevents real-time sync from overwriting active login
-    const acctMatch = partition.match(/^persist:of-(.+)$/);
-    if (acctMatch) {
-      firebaseSync.markLocallyOwned(acctMatch[1]);
-    }
-
     const wvSession = session.fromPartition(partition);
     spoofHeaders(wvSession);
 
@@ -447,6 +441,7 @@ let syncStatus = { connected: false };
 
 ipcMain.handle('sync-status', () => syncStatus);
 
+// Force Upload: push all local sessions to Firestore
 ipcMain.handle('sync-force', async () => {
   if (!firebaseSync.isInitialized) {
     const ok = await firebaseSync.initSync(store, (status) => {
@@ -457,17 +452,16 @@ ipcMain.handle('sync-force', async () => {
     });
     if (!ok) return { success: false, error: 'Failed to connect' };
   }
-  await firebaseSync.uploadAllSessions(true); // force=true bypasses hash check
+  await firebaseSync.uploadAllSessions(true);
   return { success: true };
 });
 
+// Force Download: pull all sessions from Firestore (replaces local accounts)
 ipcMain.handle('sync-download', async () => {
   if (!firebaseSync.isInitialized) return { success: false, error: 'Not connected' };
-  const result = await firebaseSync.downloadAllSessions(true); // force=true bypasses own-upload skip
-  // Notify renderer to refresh accounts and signal sync complete
+  const result = await firebaseSync.downloadAllSessions();
   if (mainWindow && !mainWindow.isDestroyed()) {
     getActiveAccounts().then(a => mainWindow.webContents.send('sync-accounts-updated', a));
-    mainWindow.webContents.send('sync-ready');
   }
   return { success: true, ...result };
 });
@@ -476,16 +470,6 @@ ipcMain.handle('sync-download', async () => {
 ipcMain.handle('sync-upload-account', async (_, accountId) => {
   if (!firebaseSync.isInitialized || !accountId) return;
   await firebaseSync.uploadSession(accountId, false);
-});
-
-// Reset sync: wipe Firestore and re-upload from this device
-ipcMain.handle('sync-reset', async () => {
-  if (!firebaseSync.isInitialized) return { success: false, error: 'Not connected' };
-  const result = await firebaseSync.resetSync();
-  if (mainWindow && !mainWindow.isDestroyed()) {
-    getActiveAccounts().then(a => mainWindow.webContents.send('sync-accounts-updated', a));
-  }
-  return result;
 });
 
 // Factory reset: wipe ALL data (local + Firestore) — clean slate

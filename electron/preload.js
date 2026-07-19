@@ -22,7 +22,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   syncForce: () => ipcRenderer.invoke('sync-force'),
   syncDownload: () => ipcRenderer.invoke('sync-download'),
   syncUploadAccount: (id) => ipcRenderer.invoke('sync-upload-account', id),
-  syncReset: () => ipcRenderer.invoke('sync-reset'),
   syncFactoryReset: () => ipcRenderer.invoke('sync-factory-reset'),
   onSyncUpdate: (callback) => {
     ipcRenderer.removeAllListeners('sync-update');
@@ -31,10 +30,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   onSyncAccountsUpdated: (callback) => {
     ipcRenderer.removeAllListeners('sync-accounts-updated');
     ipcRenderer.on('sync-accounts-updated', (_, accounts) => callback(accounts));
-  },
-  onSyncReady: (callback) => {
-    ipcRenderer.removeAllListeners('sync-ready');
-    ipcRenderer.on('sync-ready', () => callback());
   },
   // Auto-updater
   onUpdateAvailable: (callback) => {

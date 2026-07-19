@@ -33,8 +33,6 @@ export default function App() {
     setApiAccounts(Array.isArray(accts) ? accts : accts?.data || []);
   };
 
-  const [syncReady, setSyncReady] = useState(0); // increment to force webview remount
-
   useEffect(() => {
     if (window.electronAPI) {
       window.electronAPI.getAccounts().then((accts) => {
@@ -47,10 +45,6 @@ export default function App() {
       window.electronAPI.syncStatus().then((s) => setSyncStatus(s || { connected: false }));
       window.electronAPI.onSyncUpdate((status) => setSyncStatus(status));
       window.electronAPI.onSyncAccountsUpdated((accts) => setAccounts(accts || []));
-      // When sync download completes, force reload any active webview to pick up new cookies
-      if (window.electronAPI.onSyncReady) {
-        window.electronAPI.onSyncReady(() => setSyncReady((n) => n + 1));
-      }
     }
   }, []);
 
@@ -410,7 +404,7 @@ function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyC
               disabled={syncing}
               className="btn-ghost text-xs py-1.5 px-3 disabled:opacity-50"
             >
-              {syncing ? 'Syncing...' : 'Force Upload'}
+              {syncing ? 'Uploading...' : 'Force Upload'}
             </button>
             <button
               onClick={async () => {
@@ -421,26 +415,15 @@ function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyC
               disabled={syncing}
               className="btn-ghost text-xs py-1.5 px-3 disabled:opacity-50"
             >
-              {syncing ? 'Syncing...' : 'Force Download'}
+              {syncing ? 'Downloading...' : 'Force Download'}
             </button>
             <button
               onClick={async () => {
-                if (!confirm('This will wipe all sync data and re-upload from this device. Continue?')) return;
-                setSyncing(true);
-                try { await window.electronAPI?.syncReset(); } catch {}
-                setSyncing(false);
-              }}
-              disabled={syncing}
-              className="btn-ghost text-xs py-1.5 px-3 text-red-400 disabled:opacity-50"
-            >
-              {syncing ? 'Resetting...' : 'Reset Sync'}
-            </button>
-            <button
-              onClick={async () => {
-                if (!confirm('FACTORY RESET: This will delete ALL accounts, cookies, and sync data. You will need to log in again. Continue?')) return;
+                if (!confirm('This will delete ALL accounts and sync data. You will need to log in again. Continue?')) return;
                 setSyncing(true);
                 try { await window.electronAPI?.syncFactoryReset(); } catch {}
                 setAccounts([]);
+                _setActiveId(null);
                 setSyncing(false);
               }}
               disabled={syncing}
@@ -448,9 +431,6 @@ function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyC
             >
               {syncing ? 'Resetting...' : 'Factory Reset'}
             </button>
-            {syncStatus.accounts > 0 && (
-              <span className="text-xs text-gray-500 ml-auto">{syncStatus.accounts} account{syncStatus.accounts !== 1 ? 's' : ''} synced</span>
-            )}
           </div>
         </div>
       )}

@@ -8,13 +8,11 @@ const zlib = require('zlib');
 let firebaseApp, db, auth;
 let initialized = false;
 let store = null;
-let realtimeUnsubscribe = null;
 let autoUploadInterval = null;
 let syncStatusCallback = null;
 let lastUploadHashes = new Map(); // accountId -> hash
-let locallyOwnedSessions = new Set(); // sessions with active local login — don't overwrite
-let cachedDerivedKey = null; // cache PBKDF2 result
-let cachedKeySource = null; // the API key used to derive
+let cachedDerivedKey = null;
+let cachedKeySource = null;
 
 const FIREBASE_CONFIG = {
   apiKey: 'AIzaSyCtweAn8fMiNy0940RclIL1t-LZfcbxMwk',
@@ -25,7 +23,6 @@ const FIREBASE_CONFIG = {
   appId: '1:367015080565:web:edadcef1bcda99ce4b7e3c',
 };
 
-// Folders/files to sync from partition (skip Network — cookies handled via API)
 const SYNC_DIRS = ['Local Storage', 'Session Storage'];
 const SYNC_FILES = ['Preferences'];
 const SKIP_FILES = ['LOCK', 'LOG', 'LOG.old'];
@@ -75,19 +72,17 @@ function getPartitionPath(accountId) {
   return path.join(app.getPath('userData'), 'Partitions', `of-${accountId}`);
 }
 
-// ============ PARTITION FOLDER PACKING (Local Storage + Session Storage only) ============
+// ============ PARTITION PACKING ============
 function packPartition(accountId) {
   const partDir = getPartitionPath(accountId);
   if (!fs.existsSync(partDir)) return null;
 
   const files = [];
-
   for (const dir of SYNC_DIRS) {
     const dirPath = path.join(partDir, dir);
     if (!fs.existsSync(dirPath)) continue;
     collectFiles(dirPath, dir, files, 0);
   }
-
   for (const file of SYNC_FILES) {
     const filePath = path.join(partDir, file);
     if (!fs.existsSync(filePath)) continue;
@@ -98,18 +93,13 @@ function packPartition(accountId) {
   }
 
   if (files.length === 0) return null;
-
-  const json = JSON.stringify(files);
-  const compressed = zlib.gzipSync(Buffer.from(json, 'utf8'));
-  return compressed;
+  return zlib.gzipSync(Buffer.from(JSON.stringify(files), 'utf8'));
 }
 
 function collectFiles(dirPath, relativeTo, files, depth) {
   if (depth > MAX_RECURSE_DEPTH) return;
   let entries;
-  try {
-    entries = fs.readdirSync(dirPath, { withFileTypes: true });
-  } catch { return; }
+  try { entries = fs.readdirSync(dirPath, { withFileTypes: true }); } catch { return; }
   for (const entry of entries) {
     if (SKIP_FILES.includes(entry.name)) continue;
     const fullPath = path.join(dirPath, entry.name);
@@ -129,79 +119,58 @@ function unpackPartition(accountId, compressed) {
   const partDir = getPartitionPath(accountId);
   const resolvedPartDir = path.resolve(partDir);
 
-  let json, files;
+  let files;
   try {
-    json = zlib.gunzipSync(compressed).toString('utf8');
+    const json = zlib.gunzipSync(compressed).toString('utf8');
     files = JSON.parse(json);
   } catch (err) {
     throw new Error(`Corrupt partition data: ${err.message}`);
   }
-
   if (!Array.isArray(files)) throw new Error('Invalid partition format');
 
   let written = 0;
   for (const file of files) {
     if (!file.path || typeof file.path !== 'string' || !file.data) continue;
-
-    // Path traversal protection
     const filePath = path.resolve(partDir, ...file.path.split('/'));
-    if (!filePath.startsWith(resolvedPartDir)) {
-      console.warn(`[Firebase Sync] Skipping unsafe path: ${file.path}`);
-      continue;
-    }
-
+    if (!filePath.startsWith(resolvedPartDir)) continue;
     const dir = path.dirname(filePath);
     fs.mkdirSync(dir, { recursive: true });
     fs.writeFileSync(filePath, Buffer.from(file.data, 'base64'));
     written++;
   }
-
-  console.log(`[Firebase Sync] Unpacked ${written} files to partition for ${accountId}`);
+  console.log(`[Sync] Unpacked ${written} files for ${accountId}`);
 }
 
-// ============ COOKIES API (cross-platform) ============
+// ============ COOKIES ============
 async function exportCookies(accountId) {
   const ses = session.fromPartition(`persist:of-${accountId}`);
   const cookies = await ses.cookies.get({});
-  // Only sync essential cookie fields (strip Electron internals)
-  // IMPORTANT: Carefully handle fields for cross-platform compatibility (Windows <-> macOS)
   return cookies.filter(c => c.name && c.domain).map(c => {
     const domain = c.domain || '';
     const cookiePath = c.path || '/';
     const host = domain.replace(/^\./, '');
-    const secure = c.secure !== false; // default to true for OnlyFans (HTTPS)
+    const secure = c.secure !== false;
 
-    // Build cookie object — only include fields that have valid values
-    // Omitting expirationDate = session cookie (correct behavior)
     const cookie = {
       url: `https://${host}${cookiePath}`,
       name: c.name,
       value: c.value || '',
-      domain: domain,
+      domain,
       path: cookiePath,
-      secure: secure,
+      secure,
       httpOnly: c.httpOnly || false,
     };
 
-    // Only include expirationDate if it's a real positive number (persistent cookie)
-    // Session cookies must NOT have this field — omitting it is the correct way
     if (c.expirationDate && typeof c.expirationDate === 'number' && c.expirationDate > 0) {
       cookie.expirationDate = c.expirationDate;
     }
 
-    // sameSite handling for cross-platform compatibility:
-    // - "unspecified" means the server didn't set SameSite — map to "no_restriction" if secure (safest for cross-platform)
-    // - "no_restriction" (SameSite=None) REQUIRES secure=true or Chromium rejects it
-    // - "lax" and "strict" work on all platforms
     const sameSite = c.sameSite || 'unspecified';
     if (sameSite === 'unspecified' || sameSite === 'no_restriction') {
-      // Use no_restriction (SameSite=None) for secure cookies — this is the most permissive
-      // and ensures cookies are sent in all contexts (cross-site, embedded, etc.)
       cookie.sameSite = secure ? 'no_restriction' : 'lax';
     } else {
-      cookie.sameSite = sameSite; // "lax" or "strict"
+      cookie.sameSite = sameSite;
     }
-
     return cookie;
   });
 }
@@ -210,21 +179,10 @@ async function importCookies(accountId, cookies) {
   if (!Array.isArray(cookies) || cookies.length === 0) return;
   const ses = session.fromPartition(`persist:of-${accountId}`);
 
-  // Don't clear existing cookies — just set/overwrite on top
-  // This prevents accidental destruction of active sessions
-
-  let imported = 0;
-  let failed = 0;
-  const errors = [];
+  let imported = 0, failed = 0;
   for (const cookie of cookies) {
     try {
-      // Validate required fields before attempting set
-      if (!cookie.name || !cookie.url) {
-        failed++;
-        continue;
-      }
-
-      // Build a clean cookie object — only pass defined fields
+      if (!cookie.name || !cookie.url) { failed++; continue; }
       const setCookie = {
         url: cookie.url,
         name: cookie.name,
@@ -233,46 +191,27 @@ async function importCookies(accountId, cookies) {
         secure: cookie.secure !== false,
         httpOnly: cookie.httpOnly || false,
       };
-
-      // Domain: include if present (Chromium will normalize with leading dot)
-      if (cookie.domain) {
-        setCookie.domain = cookie.domain;
-      }
-
-      // expirationDate: only include for persistent cookies (must be positive number)
+      if (cookie.domain) setCookie.domain = cookie.domain;
       if (cookie.expirationDate && typeof cookie.expirationDate === 'number' && cookie.expirationDate > 0) {
         setCookie.expirationDate = cookie.expirationDate;
       }
-      // If no expirationDate, cookie is treated as session cookie (correct)
-
-      // sameSite: ensure no_restriction always paired with secure=true
       if (cookie.sameSite === 'no_restriction') {
         setCookie.sameSite = 'no_restriction';
-        setCookie.secure = true; // REQUIRED by Chromium for SameSite=None
+        setCookie.secure = true;
       } else if (cookie.sameSite === 'lax' || cookie.sameSite === 'strict') {
         setCookie.sameSite = cookie.sameSite;
       } else {
-        // "unspecified" or missing — use "lax" which is the safest cross-platform default
         setCookie.sameSite = setCookie.secure ? 'no_restriction' : 'lax';
       }
-
       await ses.cookies.set(setCookie);
       imported++;
-    } catch (err) {
-      failed++;
-      if (errors.length < 5) {
-        errors.push(`${cookie.name}@${cookie.domain}: ${err.message}`);
-      }
-    }
+    } catch { failed++; }
   }
   await ses.cookies.flushStore();
-  console.log(`[Firebase Sync] Imported ${imported}/${cookies.length} cookies for ${accountId} (${failed} failed)`);
-  if (errors.length > 0) {
-    console.warn(`[Firebase Sync] Sample cookie errors:`, errors);
-  }
+  console.log(`[Sync] Imported ${imported}/${cookies.length} cookies for ${accountId} (${failed} failed)`);
 }
 
-// ============ CORE SYNC ============
+// ============ CORE ============
 async function initSync(electronStore, statusCb) {
   store = electronStore;
   syncStatusCallback = statusCb;
@@ -282,8 +221,6 @@ async function initSync(electronStore, statusCb) {
     emitStatus({ connected: false, error: 'No API key set' });
     return false;
   }
-
-  // Prevent double-init
   if (initialized) return true;
 
   try {
@@ -291,40 +228,28 @@ async function initSync(electronStore, statusCb) {
     const { getFirestore } = require('firebase/firestore');
     const { getAuth, signInAnonymously } = require('firebase/auth');
 
-    // Only create app if it doesn't already exist
     const existingApps = getApps();
     firebaseApp = existingApps.length > 0 ? existingApps[0] : initializeApp(FIREBASE_CONFIG);
     db = getFirestore(firebaseApp);
     auth = getAuth(firebaseApp);
-
     await signInAnonymously(auth);
 
     initialized = true;
-    emitStatus({ connected: true, lastSync: null, accounts: 0 });
+    const accounts = store.get('accounts') || [];
+    emitStatus({ connected: true, lastSync: null, accounts: accounts.length });
 
-    // Mark all local accounts as owned so real-time listener won't touch them
-    // Never auto-download — user must click Force Download on new devices
-    // This prevents stale Firestore data from auto-appearing
-    const localAccounts = store.get('accounts') || [];
-    for (const acct of localAccounts) {
-      locallyOwnedSessions.add(acct.id);
-    }
-    startRealtimeListener();
+    // Auto-upload every 60s to keep Firestore current
     startAutoUpload();
 
     return true;
   } catch (err) {
-    console.error('[Firebase Sync] Init failed:', err.message);
+    console.error('[Sync] Init failed:', err.message);
     emitStatus({ connected: false, error: err.message });
     return false;
   }
 }
 
 function stopSync() {
-  if (realtimeUnsubscribe) {
-    realtimeUnsubscribe();
-    realtimeUnsubscribe = null;
-  }
   if (autoUploadInterval) {
     clearInterval(autoUploadInterval);
     autoUploadInterval = null;
@@ -344,66 +269,48 @@ async function uploadSession(accountId, force = false) {
   const apiKey = store.get('apiKey');
   if (!apiKey) return;
 
-  const teamId = getTeamId(apiKey);
-
   try {
-    // Flush session data to disk first
-    try {
-      const ses = session.fromPartition(`persist:of-${accountId}`);
-      await ses.cookies.flushStore();
-    } catch {}
-
+    const ses = session.fromPartition(`persist:of-${accountId}`);
+    await ses.cookies.flushStore();
     await new Promise(r => setTimeout(r, 300));
 
-    // Export cookies via API (cross-platform, decrypted)
     const cookies = await exportCookies(accountId);
-
-    // Pack local/session storage files
     const packed = packPartition(accountId);
 
-    if (!packed && cookies.length === 0) {
-      console.log(`[Firebase Sync] No data for ${accountId}`);
+    // Only upload if there's actual data (cookies from a logged-in session)
+    if (cookies.length === 0) {
+      console.log(`[Sync] Skipping upload for ${accountId} — no cookies`);
       return;
     }
 
-    // Only upload if this device actually logged in (has cookies) — prevent uploading stale/empty data
-    if (cookies.length === 0 && !locallyOwnedSessions.has(accountId)) {
-      console.log(`[Firebase Sync] Skipping upload for ${accountId} — no local cookies and not locally owned`);
-      return;
-    }
-
-    // Build payload and hash
     const payload = { cookies, partition: packed ? packed.toString('base64') : null };
     const payloadStr = JSON.stringify(payload);
     const hash = crypto.createHash('sha256').update(payloadStr).digest('hex');
     if (!force && lastUploadHashes.get(accountId) === hash) return;
 
-    // Encrypt the full payload
     const compressed = zlib.gzipSync(Buffer.from(payloadStr, 'utf8'));
     const encrypted = encrypt(compressed, apiKey);
     const b64 = encrypted.toString('base64');
 
     if (b64.length > 900000) {
-      console.error(`[Firebase Sync] Data too large for Firestore (${Math.round(b64.length / 1024)}KB)`);
+      console.error(`[Sync] Data too large (${Math.round(b64.length / 1024)}KB)`);
       return;
     }
 
-    const { doc, setDoc } = require('firebase/firestore');
+    const teamId = getTeamId(apiKey);
     const machineId = getMachineId();
+    const { doc, setDoc } = require('firebase/firestore');
 
     await setDoc(doc(db, `teams/${teamId}/sessions`, accountId), {
       data: b64,
       dataHash: hash,
-      version: 2, // v2 = cookies via API + partition files
+      version: 2,
       updatedAt: Date.now(),
       updatedBy: machineId,
     });
 
-    lastUploadHashes.set(accountId, hash);
-    locallyOwnedSessions.add(accountId); // This device owns this session — block incoming overwrites
-
     const accounts = store.get('accounts') || [];
-    const acct = accounts.find((a) => a.id === accountId);
+    const acct = accounts.find(a => a.id === accountId);
     if (acct) {
       await setDoc(doc(db, `teams/${teamId}/accounts`, accountId), {
         id: acct.id,
@@ -413,10 +320,11 @@ async function uploadSession(accountId, force = false) {
       });
     }
 
+    lastUploadHashes.set(accountId, hash);
     emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: accounts.length });
-    console.log(`[Firebase Sync] Uploaded ${cookies.length} cookies + partition for ${accountId} (${Math.round(b64.length / 1024)}KB)`);
+    console.log(`[Sync] Uploaded ${accountId} (${cookies.length} cookies, ${Math.round(b64.length / 1024)}KB)`);
   } catch (err) {
-    console.error(`[Firebase Sync] Upload failed for ${accountId}:`, err.message);
+    console.error(`[Sync] Upload failed for ${accountId}:`, err.message);
   }
 }
 
@@ -428,44 +336,28 @@ async function uploadAllSessions(force = false) {
   }
 }
 
-// ============ DOWNLOAD ============
-async function downloadAllSessions(force = false) {
-  if (!initialized || !db || !store) return;
+// ============ DOWNLOAD (Force Download only — no auto-download) ============
+async function downloadAllSessions() {
+  if (!initialized || !db || !store) return null;
 
   const apiKey = store.get('apiKey');
-  if (!apiKey) return;
+  if (!apiKey) return null;
 
   const teamId = getTeamId(apiKey);
-  const machineId = getMachineId();
 
   try {
     const { collection, getDocs } = require('firebase/firestore');
 
+    // Get remote accounts — this becomes the ONLY source of truth
     const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
     const remoteAccounts = [];
-    accountsSnap.forEach((d) => remoteAccounts.push(d.data()));
+    accountsSnap.forEach(d => remoteAccounts.push(d.data()));
 
-    let localAccounts = store.get('accounts') || [];
+    // Replace local account list with remote (clean slate)
+    const localAccounts = remoteAccounts.map(r => ({ id: r.id, name: r.name }));
+    store.set('accounts', localAccounts);
 
-    if (force) {
-      // Force download: replace account list with remote (clean slate)
-      localAccounts = remoteAccounts.map(r => {
-        const existing = localAccounts.find(a => a.id === r.id);
-        return existing || { id: r.id, name: r.name };
-      });
-      store.set('accounts', localAccounts);
-    } else {
-      // Normal: only add new accounts
-      let updated = false;
-      for (const remote of remoteAccounts) {
-        if (!localAccounts.find((a) => a.id === remote.id)) {
-          localAccounts.push({ id: remote.id, name: remote.name });
-          updated = true;
-        }
-      }
-      if (updated) store.set('accounts', localAccounts);
-    }
-
+    // Import all sessions
     const sessionsSnap = await getDocs(collection(db, `teams/${teamId}/sessions`));
     let syncedCount = 0;
 
@@ -473,225 +365,70 @@ async function downloadAllSessions(force = false) {
       const data = docSnap.data();
       const accountId = docSnap.id;
 
-      if (!force && data.updatedBy === machineId) {
-        lastUploadHashes.set(accountId, data.dataHash || data.partitionHash || '');
-        locallyOwnedSessions.add(accountId);
-        continue;
-      }
-
-      // Skip import if session already has cookies locally (user already logged in)
-      if (!force) {
-        const ses = session.fromPartition(`persist:of-${accountId}`);
-        const localCookies = await ses.cookies.get({});
-        if (localCookies.length > 0) {
-          console.log(`[Firebase Sync] Skipping download for ${accountId} — already has ${localCookies.length} local cookies`);
-          locallyOwnedSessions.add(accountId);
-          lastUploadHashes.set(accountId, data.dataHash || data.partitionHash || '');
-          continue;
+      try {
+        if (data.version === 2 && data.data) {
+          const encrypted = Buffer.from(data.data, 'base64');
+          const compressed = decrypt(encrypted, apiKey);
+          const json = zlib.gunzipSync(compressed).toString('utf8');
+          const payload = JSON.parse(json);
+          if (payload.cookies) await importCookies(accountId, payload.cookies);
+          if (payload.partition) unpackPartition(accountId, Buffer.from(payload.partition, 'base64'));
+          lastUploadHashes.set(accountId, data.dataHash || '');
+          syncedCount++;
+        } else if (data.partition) {
+          const encrypted = Buffer.from(data.partition, 'base64');
+          const compressed = decrypt(encrypted, apiKey);
+          unpackPartition(accountId, compressed);
+          lastUploadHashes.set(accountId, data.partitionHash || '');
+          syncedCount++;
         }
+      } catch (err) {
+        console.error(`[Sync] Import failed for ${accountId}:`, err.message);
       }
-
-      await importSession(accountId, data, apiKey);
-      syncedCount++;
     }
 
     emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: localAccounts.length });
-    console.log(`[Firebase Sync] Downloaded ${syncedCount} sessions`);
+    console.log(`[Sync] Downloaded ${syncedCount} sessions`);
     return { syncedCount, accounts: localAccounts };
   } catch (err) {
-    console.error('[Firebase Sync] Download failed:', err.message);
-    emitStatus({ connected: true, lastSync: null, error: err.message });
+    console.error('[Sync] Download failed:', err.message);
     return null;
   }
 }
 
-async function importSession(accountId, data, apiKey) {
-  try {
-    if (data.version === 2 && data.data) {
-      // v2 format: cookies via API + partition files
-      const encrypted = Buffer.from(data.data, 'base64');
-      const compressed = decrypt(encrypted, apiKey);
-      const json = zlib.gunzipSync(compressed).toString('utf8');
-      const payload = JSON.parse(json);
-
-      // Import cookies via Electron API (cross-platform)
-      if (payload.cookies) {
-        await importCookies(accountId, payload.cookies);
-      }
-
-      // Unpack local/session storage files
-      if (payload.partition) {
-        const partBuf = Buffer.from(payload.partition, 'base64');
-        unpackPartition(accountId, partBuf);
-      }
-
-      lastUploadHashes.set(accountId, data.dataHash || '');
-    } else if (data.partition) {
-      // v1 format (legacy): raw partition files including Network
-      const encrypted = Buffer.from(data.partition, 'base64');
-      const compressed = decrypt(encrypted, apiKey);
-      unpackPartition(accountId, compressed);
-      lastUploadHashes.set(accountId, data.partitionHash || '');
-    }
-
-    emitStatus({ connected: true, lastSync: new Date().toISOString() });
-  } catch (err) {
-    console.error(`[Firebase Sync] Import failed for ${accountId}:`, err.message);
-  }
-}
-
-// ============ REAL-TIME LISTENER ============
-let realtimeQueue = Promise.resolve();
-
-function startRealtimeListener() {
-  if (!initialized || !db || !store) return;
-
-  const apiKey = store.get('apiKey');
-  if (!apiKey) return;
-
-  const teamId = getTeamId(apiKey);
-  const machineId = getMachineId();
-
-  const { collection, onSnapshot } = require('firebase/firestore');
-
-  realtimeUnsubscribe = onSnapshot(
-    collection(db, `teams/${teamId}/sessions`),
-    (snapshot) => {
-      for (const change of snapshot.docChanges()) {
-        if (change.type !== 'added' && change.type !== 'modified') continue;
-        const data = change.doc.data();
-        const accountId = change.doc.id;
-
-        if (data.updatedBy === machineId) continue;
-        if (!data.data && !data.partition) continue;
-
-        // Don't overwrite sessions that have an active local login
-        if (locallyOwnedSessions.has(accountId)) {
-          console.log(`[Firebase Sync] Skipping real-time update for ${accountId} — locally owned`);
-          continue;
-        }
-
-        // Queue sequentially to prevent concurrent file writes
-        realtimeQueue = realtimeQueue.then(async () => {
-          try {
-            console.log(`[Firebase Sync] Real-time update for ${accountId}`);
-            await importSession(accountId, data, apiKey);
-
-            const localAccounts = store.get('accounts') || [];
-            if (!localAccounts.find((a) => a.id === accountId)) {
-              const { doc, getDoc } = require('firebase/firestore');
-              const acctDoc = await getDoc(doc(db, `teams/${teamId}/accounts`, accountId));
-              if (acctDoc.exists()) {
-                const acctData = acctDoc.data();
-                localAccounts.push({ id: acctData.id, name: acctData.name });
-                store.set('accounts', localAccounts);
-              }
-            }
-
-            emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: localAccounts.length });
-          } catch (err) {
-            console.error(`[Firebase Sync] Real-time sync error for ${accountId}:`, err.message);
-          }
-        });
-      }
-    },
-    (err) => {
-      console.error('[Firebase Sync] Listener error:', err.message);
-    }
-  );
-}
-
 // ============ AUTO UPLOAD ============
-const AUTO_UPLOAD_INTERVAL = 60 * 1000; // 1 minute
-
 function startAutoUpload() {
   if (autoUploadInterval) clearInterval(autoUploadInterval);
   autoUploadInterval = setInterval(() => {
     uploadAllSessions(false).catch(() => {});
-  }, AUTO_UPLOAD_INTERVAL);
+  }, 60 * 1000);
 }
 
-function markLocallyOwned(accountId) {
-  locallyOwnedSessions.add(accountId);
-}
-
-// Reset all sync data in Firestore and re-upload from this device
-async function resetSync() {
-  if (!initialized || !db || !store) return { success: false, error: 'Not connected' };
-
-  const apiKey = store.get('apiKey');
-  if (!apiKey) return { success: false, error: 'No API key' };
-
-  const teamId = getTeamId(apiKey);
-
-  try {
-    const { collection, getDocs, deleteDoc, doc } = require('firebase/firestore');
-
-    // Delete all sessions
-    const sessionsSnap = await getDocs(collection(db, `teams/${teamId}/sessions`));
-    for (const d of sessionsSnap.docs) {
-      await deleteDoc(doc(db, `teams/${teamId}/sessions`, d.id));
-    }
-
-    // Delete all accounts
-    const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
-    for (const d of accountsSnap.docs) {
-      await deleteDoc(doc(db, `teams/${teamId}/accounts`, d.id));
-    }
-
-    // Clear local hashes so re-upload isn't blocked
-    lastUploadHashes.clear();
-    locallyOwnedSessions.clear();
-
-    // Re-upload all current local sessions
-    await uploadAllSessions(true);
-
-    console.log('[Firebase Sync] Reset complete — wiped Firestore and re-uploaded');
-    return { success: true };
-  } catch (err) {
-    console.error('[Firebase Sync] Reset failed:', err.message);
-    return { success: false, error: err.message };
-  }
-}
-
-// Factory reset: wipe Firestore + clear accounts list — clean slate
+// ============ FACTORY RESET ============
 async function factoryReset() {
-  try {
-    // 1. Clear accounts list immediately (keeps API key)
-    if (store) {
-      store.set('accounts', []);
-    }
+  // 1. Clear local data immediately
+  if (store) store.set('accounts', []);
+  lastUploadHashes.clear();
 
-    // 2. Clear local sync state
-    lastUploadHashes.clear();
-    locallyOwnedSessions.clear();
-
-    // 3. Wipe Firestore data (with 10s timeout so it never hangs)
-    if (initialized && db && store) {
-      const apiKey = store.get('apiKey');
-      if (apiKey) {
+  // 2. Wipe Firestore
+  if (initialized && db && store) {
+    const apiKey = store.get('apiKey');
+    if (apiKey) {
+      try {
         const teamId = getTeamId(apiKey);
         const { collection, getDocs, deleteDoc, doc } = require('firebase/firestore');
-        const wipe = async () => {
-          const sessionsSnap = await getDocs(collection(db, `teams/${teamId}/sessions`));
-          for (const d of sessionsSnap.docs) {
-            await deleteDoc(doc(db, `teams/${teamId}/sessions`, d.id));
-          }
-          const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
-          for (const d of accountsSnap.docs) {
-            await deleteDoc(doc(db, `teams/${teamId}/accounts`, d.id));
-          }
-        };
-        await Promise.race([wipe(), new Promise(r => setTimeout(r, 10000))]);
+        const sessionsSnap = await getDocs(collection(db, `teams/${teamId}/sessions`));
+        for (const d of sessionsSnap.docs) await deleteDoc(doc(db, `teams/${teamId}/sessions`, d.id));
+        const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
+        for (const d of accountsSnap.docs) await deleteDoc(doc(db, `teams/${teamId}/accounts`, d.id));
+      } catch (e) {
+        console.error('[Sync] Firestore wipe error:', e.message);
       }
     }
-
-    console.log('[Firebase Sync] Factory reset complete');
-    return { success: true };
-  } catch (err) {
-    console.error('[Firebase Sync] Factory reset failed:', err.message);
-    return { success: true }; // return success anyway — local data is already cleared
   }
+
+  console.log('[Sync] Factory reset complete');
+  return { success: true };
 }
 
 // ============ EXPORTS ============
@@ -701,8 +438,6 @@ module.exports = {
   uploadSession,
   uploadAllSessions,
   downloadAllSessions,
-  markLocallyOwned,
-  resetSync,
   factoryReset,
   get isInitialized() { return initialized; },
 };
