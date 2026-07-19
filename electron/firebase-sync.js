@@ -210,14 +210,8 @@ async function importCookies(accountId, cookies) {
   if (!Array.isArray(cookies) || cookies.length === 0) return;
   const ses = session.fromPartition(`persist:of-${accountId}`);
 
-  // ACTUALLY clear existing cookies (flushStore only writes to disk, doesn't clear!)
-  const existing = await ses.cookies.get({});
-  for (const c of existing) {
-    try {
-      const url = `https://${(c.domain || '').replace(/^\./, '')}${c.path || '/'}`;
-      await ses.cookies.remove(url, c.name);
-    } catch {}
-  }
+  // Don't clear existing cookies — just set/overwrite on top
+  // This prevents accidental destruction of active sessions
 
   let imported = 0;
   let failed = 0;
