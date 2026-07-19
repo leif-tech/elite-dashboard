@@ -302,16 +302,12 @@ async function initSync(electronStore, statusCb) {
     initialized = true;
     emitStatus({ connected: true, lastSync: null, accounts: 0 });
 
-    // Only auto-download on fresh installs (no local accounts)
-    // Existing devices should never have their data overwritten on startup
+    // Mark all local accounts as owned so real-time listener won't touch them
+    // Never auto-download — user must click Force Download on new devices
+    // This prevents stale Firestore data from auto-appearing
     const localAccounts = store.get('accounts') || [];
-    if (localAccounts.length === 0) {
-      await downloadAllSessions();
-    } else {
-      // Mark all local accounts as owned so real-time listener won't touch them
-      for (const acct of localAccounts) {
-        locallyOwnedSessions.add(acct.id);
-      }
+    for (const acct of localAccounts) {
+      locallyOwnedSessions.add(acct.id);
     }
     startRealtimeListener();
     startAutoUpload();
@@ -658,6 +654,63 @@ async function resetSync() {
   }
 }
 
+// Factory reset: clear ALL local data (cookies, partitions, accounts) + wipe Firestore
+async function factoryReset() {
+  try {
+    // 1. Wipe Firestore data if connected
+    if (initialized && db && store) {
+      const apiKey = store.get('apiKey');
+      if (apiKey) {
+        const teamId = getTeamId(apiKey);
+        const { collection, getDocs, deleteDoc, doc } = require('firebase/firestore');
+        const sessionsSnap = await getDocs(collection(db, `teams/${teamId}/sessions`));
+        for (const d of sessionsSnap.docs) {
+          await deleteDoc(doc(db, `teams/${teamId}/sessions`, d.id));
+        }
+        const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
+        for (const d of accountsSnap.docs) {
+          await deleteDoc(doc(db, `teams/${teamId}/accounts`, d.id));
+        }
+      }
+    }
+
+    // 2. Clear cookies from all partitions
+    const accounts = store ? (store.get('accounts') || []) : [];
+    for (const acct of accounts) {
+      try {
+        const ses = session.fromPartition(`persist:of-${acct.id}`);
+        await ses.clearStorageData();
+      } catch {}
+    }
+
+    // 3. Clear accounts list (keep API key)
+    if (store) {
+      store.set('accounts', []);
+    }
+
+    // 4. Delete partition directories from disk
+    const partitionsDir = path.join(app.getPath('userData'), 'Partitions');
+    if (fs.existsSync(partitionsDir)) {
+      const entries = fs.readdirSync(partitionsDir);
+      for (const entry of entries) {
+        if (entry === 'default') continue; // keep default partition
+        const dirPath = path.join(partitionsDir, entry);
+        try { fs.rmSync(dirPath, { recursive: true, force: true }); } catch {}
+      }
+    }
+
+    // 5. Clear local sync state
+    lastUploadHashes.clear();
+    locallyOwnedSessions.clear();
+
+    console.log('[Firebase Sync] Factory reset complete');
+    return { success: true };
+  } catch (err) {
+    console.error('[Firebase Sync] Factory reset failed:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
 // ============ EXPORTS ============
 module.exports = {
   initSync,
@@ -667,5 +720,6 @@ module.exports = {
   downloadAllSessions,
   markLocallyOwned,
   resetSync,
+  factoryReset,
   get isInitialized() { return initialized; },
 };

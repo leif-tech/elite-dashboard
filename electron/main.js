@@ -488,6 +488,15 @@ ipcMain.handle('sync-reset', async () => {
   return result;
 });
 
+// Factory reset: wipe ALL data (local + Firestore) — clean slate
+ipcMain.handle('sync-factory-reset', async () => {
+  const result = await firebaseSync.factoryReset();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('sync-accounts-updated', []);
+  }
+  return result;
+});
+
 async function initFirebaseSync() {
   const apiKey = store.get('apiKey');
   if (!apiKey) return;
@@ -499,13 +508,6 @@ async function initFirebaseSync() {
         mainWindow.webContents.send('sync-update', status);
       }
     });
-    // After initial download completes, notify renderer to refresh account list
-    // This ensures any newly-synced accounts appear in the sidebar
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      getActiveAccounts().then(a => mainWindow.webContents.send('sync-accounts-updated', a));
-      // Signal that sync download is complete — webviews can now load with valid cookies
-      mainWindow.webContents.send('sync-ready');
-    }
   } catch (err) {
     console.error('[Sync] Failed to init:', err.message);
   }

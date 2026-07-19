@@ -435,6 +435,19 @@ function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyC
             >
               {syncing ? 'Resetting...' : 'Reset Sync'}
             </button>
+            <button
+              onClick={async () => {
+                if (!confirm('FACTORY RESET: This will delete ALL accounts, cookies, and sync data. You will need to log in again. Continue?')) return;
+                setSyncing(true);
+                try { await window.electronAPI?.syncFactoryReset(); } catch {}
+                setAccounts([]);
+                setSyncing(false);
+              }}
+              disabled={syncing}
+              className="btn-ghost text-xs py-1.5 px-3 text-red-500 disabled:opacity-50"
+            >
+              {syncing ? 'Resetting...' : 'Factory Reset'}
+            </button>
             {syncStatus.accounts > 0 && (
               <span className="text-xs text-gray-500 ml-auto">{syncStatus.accounts} account{syncStatus.accounts !== 1 ? 's' : ''} synced</span>
             )}
