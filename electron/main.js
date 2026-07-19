@@ -466,6 +466,16 @@ ipcMain.handle('sync-upload-account', async (_, accountId) => {
   await firebaseSync.uploadSession(accountId, false);
 });
 
+// Reset sync: wipe Firestore and re-upload from this device
+ipcMain.handle('sync-reset', async () => {
+  if (!firebaseSync.isInitialized) return { success: false, error: 'Not connected' };
+  const result = await firebaseSync.resetSync();
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('sync-accounts-updated', store.get('accounts') || []);
+  }
+  return result;
+});
+
 async function initFirebaseSync() {
   const apiKey = store.get('apiKey');
   if (!apiKey) return;

@@ -445,15 +445,26 @@ async function downloadAllSessions(force = false) {
     const remoteAccounts = [];
     accountsSnap.forEach((d) => remoteAccounts.push(d.data()));
 
-    const localAccounts = store.get('accounts') || [];
-    let updated = false;
-    for (const remote of remoteAccounts) {
-      if (!localAccounts.find((a) => a.id === remote.id)) {
-        localAccounts.push({ id: remote.id, name: remote.name });
-        updated = true;
+    let localAccounts = store.get('accounts') || [];
+
+    if (force) {
+      // Force download: replace account list with remote (clean slate)
+      localAccounts = remoteAccounts.map(r => {
+        const existing = localAccounts.find(a => a.id === r.id);
+        return existing || { id: r.id, name: r.name };
+      });
+      store.set('accounts', localAccounts);
+    } else {
+      // Normal: only add new accounts
+      let updated = false;
+      for (const remote of remoteAccounts) {
+        if (!localAccounts.find((a) => a.id === remote.id)) {
+          localAccounts.push({ id: remote.id, name: remote.name });
+          updated = true;
+        }
       }
+      if (updated) store.set('accounts', localAccounts);
     }
-    if (updated) store.set('accounts', localAccounts);
 
     const sessionsSnap = await getDocs(collection(db, `teams/${teamId}/sessions`));
     let syncedCount = 0;
@@ -604,6 +615,45 @@ function markLocallyOwned(accountId) {
   locallyOwnedSessions.add(accountId);
 }
 
+// Reset all sync data in Firestore and re-upload from this device
+async function resetSync() {
+  if (!initialized || !db || !store) return { success: false, error: 'Not connected' };
+
+  const apiKey = store.get('apiKey');
+  if (!apiKey) return { success: false, error: 'No API key' };
+
+  const teamId = getTeamId(apiKey);
+
+  try {
+    const { collection, getDocs, deleteDoc, doc } = require('firebase/firestore');
+
+    // Delete all sessions
+    const sessionsSnap = await getDocs(collection(db, `teams/${teamId}/sessions`));
+    for (const d of sessionsSnap.docs) {
+      await deleteDoc(doc(db, `teams/${teamId}/sessions`, d.id));
+    }
+
+    // Delete all accounts
+    const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
+    for (const d of accountsSnap.docs) {
+      await deleteDoc(doc(db, `teams/${teamId}/accounts`, d.id));
+    }
+
+    // Clear local hashes so re-upload isn't blocked
+    lastUploadHashes.clear();
+    locallyOwnedSessions.clear();
+
+    // Re-upload all current local sessions
+    await uploadAllSessions(true);
+
+    console.log('[Firebase Sync] Reset complete — wiped Firestore and re-uploaded');
+    return { success: true };
+  } catch (err) {
+    console.error('[Firebase Sync] Reset failed:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
 // ============ EXPORTS ============
 module.exports = {
   initSync,
@@ -612,5 +662,6 @@ module.exports = {
   uploadAllSessions,
   downloadAllSessions,
   markLocallyOwned,
+  resetSync,
   get isInitialized() { return initialized; },
 };

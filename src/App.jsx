@@ -423,6 +423,18 @@ function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyC
             >
               {syncing ? 'Syncing...' : 'Force Download'}
             </button>
+            <button
+              onClick={async () => {
+                if (!confirm('This will wipe all sync data and re-upload from this device. Continue?')) return;
+                setSyncing(true);
+                try { await window.electronAPI?.syncReset(); } catch {}
+                setSyncing(false);
+              }}
+              disabled={syncing}
+              className="btn-ghost text-xs py-1.5 px-3 text-red-400 disabled:opacity-50"
+            >
+              {syncing ? 'Resetting...' : 'Reset Sync'}
+            </button>
             {syncStatus.accounts > 0 && (
               <span className="text-xs text-gray-500 ml-auto">{syncStatus.accounts} account{syncStatus.accounts !== 1 ? 's' : ''} synced</span>
             )}
