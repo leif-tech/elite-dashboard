@@ -9,6 +9,7 @@ let realtimeUnsubscribe = null;
 let uploadInterval = null;
 let syncStatusCallback = null;
 let lastUploadHashes = new Map(); // accountId -> hash
+let isImporting = false; // flag to suppress cookie-changed during import
 
 // ============ FIREBASE CONFIG ============
 // Replace with your Firebase project config (one-time setup)
@@ -87,14 +88,14 @@ async function initSync(electronStore, statusCb) {
     initialized = true;
     emitStatus({ connected: true, lastSync: null, accounts: 0 });
 
-    // Initial download then upload
+    // Initial download only — don't auto-upload on startup
+    // Uploads happen via: cookie-changed listener, periodic interval, or Force Upload
     await downloadAllSessions();
-    await uploadAllSessions();
 
     // Start real-time listener
     startRealtimeListener();
 
-    // Periodic upload every 3 minutes
+    // Periodic upload every 3 minutes (skips if cookies unchanged via hash check)
     uploadInterval = setInterval(() => uploadAllSessions(), 3 * 60 * 1000);
 
     return true;
@@ -257,6 +258,7 @@ async function downloadAllSessions() {
 
 async function importSession(accountId, data, apiKey) {
   try {
+    isImporting = true;
     const decrypted = decrypt(data.cookies, apiKey);
     const cookies = JSON.parse(decrypted);
 
@@ -304,7 +306,9 @@ async function importSession(accountId, data, apiKey) {
     console.log(`[Firebase Sync] Imported ${imported} cookies for ${accountId} (${failed} failed)`);
     // Update local hash so we don't re-upload what we just downloaded
     lastUploadHashes.set(accountId, data.cookieHash);
+    isImporting = false;
   } catch (err) {
+    isImporting = false;
     console.error(`[Firebase Sync] Import failed for ${accountId}:`, err.message);
   }
 }
@@ -378,4 +382,5 @@ module.exports = {
   uploadAllSessions,
   downloadAllSessions,
   get isInitialized() { return initialized; },
+  get isImporting() { return isImporting; },
 };

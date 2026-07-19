@@ -447,6 +447,8 @@ function registerCookieListener(accountId) {
 
   const ses = session.fromPartition(partitionName);
   ses.cookies.on('changed', (_event, cookie, _cause, removed) => {
+    // Skip during import to prevent upload loop
+    if (firebaseSync.isImporting) return;
     // Only care about onlyfans.com cookies being set (not removed)
     if (removed) return;
     const domain = cookie.domain || '';
@@ -456,7 +458,7 @@ function registerCookieListener(accountId) {
     if (!registerCookieListener._timers) registerCookieListener._timers = {};
     clearTimeout(registerCookieListener._timers[accountId]);
     registerCookieListener._timers[accountId] = setTimeout(() => {
-      if (firebaseSync.isInitialized) {
+      if (firebaseSync.isInitialized && !firebaseSync.isImporting) {
         firebaseSync.uploadSession(accountId).catch(() => {});
       }
     }, 5000); // 5s debounce
