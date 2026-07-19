@@ -284,12 +284,16 @@ async function importSession(accountId, data, apiKey) {
           url: `https://${cleanDomain}${cookie.path || '/'}`,
           name: cookie.name,
           value: cookie.value,
-          domain: cookie.domain.startsWith('.') ? cookie.domain : cleanDomain,
           path: cookie.path || '/',
           secure: cookie.secure !== false,
           httpOnly: cookie.httpOnly || false,
           sameSite,
         };
+        // Only pass domain for subdomain cookies (dot-prefixed)
+        // Host-only cookies (no dot) must NOT have domain — Electron derives from URL
+        if (cookie.domain.startsWith('.')) {
+          cookieDetails.domain = cookie.domain;
+        }
         if (cookie.expirationDate) {
           cookieDetails.expirationDate = cookie.expirationDate;
         }
