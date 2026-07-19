@@ -17,4 +17,16 @@ contextBridge.exposeInMainWorld('electronAPI', {
   maximize: () => ipcRenderer.invoke('win-maximize'),
   close: () => ipcRenderer.invoke('win-close'),
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
+  // Session Sync
+  syncStatus: () => ipcRenderer.invoke('sync-status'),
+  syncForce: () => ipcRenderer.invoke('sync-force'),
+  syncDownload: () => ipcRenderer.invoke('sync-download'),
+  onSyncUpdate: (callback) => {
+    ipcRenderer.removeAllListeners('sync-update');
+    ipcRenderer.on('sync-update', (_, status) => callback(status));
+  },
+  onSyncAccountsUpdated: (callback) => {
+    ipcRenderer.removeAllListeners('sync-accounts-updated');
+    ipcRenderer.on('sync-accounts-updated', (_, accounts) => callback(accounts));
+  },
 });

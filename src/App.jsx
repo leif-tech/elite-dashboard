@@ -14,6 +14,7 @@ export default function App() {
   const [hoveredAcct, setHoveredAcct] = useState(null);
   const [apiAccounts, setApiAccounts] = useState([]);
   const [apiKeySet, setApiKeySet] = useState(false);
+  const [syncStatus, setSyncStatus] = useState({ connected: false });
 
   const loadApiAccounts = async (key) => {
     if (!key) return;
@@ -32,6 +33,10 @@ export default function App() {
       window.electronAPI.getApiKey().then((key) => {
         if (key) loadApiAccounts(key).catch(() => {});
       });
+      // Sync status
+      window.electronAPI.syncStatus().then((s) => setSyncStatus(s || { connected: false }));
+      window.electronAPI.onSyncUpdate((status) => setSyncStatus(status));
+      window.electronAPI.onSyncAccountsUpdated((accts) => setAccounts(accts || []));
     }
   }, []);
 
@@ -75,7 +80,7 @@ export default function App() {
       return <ProxySettingsView accounts={accounts} />;
     }
     if (activeId === null) {
-      return <HomeView accounts={accounts} onSelect={setActiveId} onAdd={() => setAdding(true)} apiKeySet={apiKeySet} apiAccounts={apiAccounts} onApiKeyConnect={loadApiAccounts} />;
+      return <HomeView accounts={accounts} onSelect={setActiveId} onAdd={() => setAdding(true)} apiKeySet={apiKeySet} apiAccounts={apiAccounts} onApiKeyConnect={loadApiAccounts} syncStatus={syncStatus} />;
     }
     const acct = accounts.find((a) => a.id === activeId);
     return <OFWebview accountId={activeId} proxy={acct?.proxy} onToggleProxy={() => toggleProxy(activeId)} />;
@@ -177,6 +182,13 @@ export default function App() {
 
         {/* Tool icons at bottom */}
         <div className="flex flex-col items-center gap-1 py-2 border-t border-dark-700 w-full">
+          {/* Sync status indicator */}
+          <div className="relative w-9 h-9 flex items-center justify-center" title={syncStatus.connected ? `Synced${syncStatus.lastSync ? ' · ' + new Date(syncStatus.lastSync).toLocaleTimeString() : ''}` : 'Sync disconnected'}>
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={syncStatus.connected ? 'text-gray-400' : 'text-gray-700'}>
+              <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+            </svg>
+            <div className={`absolute bottom-1 right-1 w-2.5 h-2.5 rounded-full border border-dark-900 ${syncStatus.connected ? 'bg-green-500' : 'bg-red-500'}`} />
+          </div>
           <button
             onClick={() => setActiveId('__chats__')}
             className={`w-9 h-9 rounded-lg flex items-center justify-center transition-colors ${
@@ -254,10 +266,11 @@ export default function App() {
 }
 
 // Home / landing page
-function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyConnect }) {
+function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyConnect, syncStatus }) {
   const [keyInput, setKeyInput] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState('');
+  const [syncing, setSyncing] = useState(false);
 
   const handleConnect = async () => {
     const trimmed = keyInput.trim();
@@ -351,6 +364,55 @@ function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyC
           ) : (
             <p className="text-sm text-gray-500">API connected but no model accounts found. Connect models at app.onlyfansapi.com.</p>
           )}
+        </div>
+      )}
+
+      {/* Session Sync Card */}
+      {apiKeySet && (
+        <div className="card max-w-lg mb-8 p-5">
+          <div className="flex items-center gap-3 mb-3">
+            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${syncStatus.connected ? 'bg-green-500/10' : 'bg-red-500/10'}`}>
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={syncStatus.connected ? 'text-green-400' : 'text-red-400'}>
+                <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
+              </svg>
+            </div>
+            <div className="flex-1">
+              <h3 className="font-semibold text-sm">Session Sync</h3>
+              <p className="text-xs text-gray-500">
+                {syncStatus.connected
+                  ? `Connected${syncStatus.lastSync ? ' · Last sync: ' + new Date(syncStatus.lastSync).toLocaleTimeString() : ''}`
+                  : syncStatus.error || 'Disconnected'}
+              </p>
+            </div>
+            <div className={`w-3 h-3 rounded-full ${syncStatus.connected ? 'bg-green-500' : 'bg-red-500'}`} />
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={async () => {
+                setSyncing(true);
+                try { await window.electronAPI?.syncForce(); } catch {}
+                setSyncing(false);
+              }}
+              disabled={syncing}
+              className="btn-ghost text-xs py-1.5 px-3 disabled:opacity-50"
+            >
+              {syncing ? 'Syncing...' : 'Force Upload'}
+            </button>
+            <button
+              onClick={async () => {
+                setSyncing(true);
+                try { await window.electronAPI?.syncDownload(); } catch {}
+                setSyncing(false);
+              }}
+              disabled={syncing}
+              className="btn-ghost text-xs py-1.5 px-3 disabled:opacity-50"
+            >
+              {syncing ? 'Syncing...' : 'Force Download'}
+            </button>
+            {syncStatus.accounts > 0 && (
+              <span className="text-xs text-gray-500 ml-auto">{syncStatus.accounts} account{syncStatus.accounts !== 1 ? 's' : ''} synced</span>
+            )}
+          </div>
         </div>
       )}
 

@@ -1,6 +1,7 @@
 const { app, BrowserWindow, ipcMain, session, Menu, clipboard, shell } = require('electron');
 const path = require('path');
 const Store = require('electron-store').default;
+const firebaseSync = require('./firebase-sync');
 
 const CHROME_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -39,6 +40,8 @@ let mainWindow;
 const activePopups = new Map();
 // Runtime map: proxy host:port -> { username, password }
 const proxyCredentials = new Map();
+// Track which partitions have cookie listeners
+const cookieListeners = new Set();
 
 function spoofHeaders(ses) {
   ses.webRequest.onBeforeSendHeaders((details, callback) => {
@@ -169,6 +172,10 @@ function createWindow() {
     const prefs = wvContents.getLastWebPreferences();
     const partition = prefs?.partition || 'persist:default';
 
+    // Register cookie sync listener for this partition
+    const partMatch = partition.match(/^persist:of-(.+)$/);
+    if (partMatch) registerCookieListener(partMatch[1]);
+
     const wvSession = session.fromPartition(partition);
     spoofHeaders(wvSession);
 
@@ -268,6 +275,10 @@ ipcMain.handle('save-account', (_, account) => {
   if (idx >= 0) accounts[idx] = { ...accounts[idx], ...account };
   else accounts.push(account);
   store.set('accounts', accounts);
+  // Sync account list to Firebase
+  if (firebaseSync.isInitialized) {
+    firebaseSync.uploadSession(account.id).catch(() => {});
+  }
   return accounts;
 });
 ipcMain.handle('remove-account', (_, id) => {
@@ -399,8 +410,92 @@ app.on('login', (event, _webContents, _details, authInfo, callback) => {
   callback();
 });
 
-app.whenReady().then(createWindow);
-app.on('window-all-closed', () => app.quit());
+// ============ SESSION SYNC IPC ============
+let syncStatus = { connected: false };
+
+ipcMain.handle('sync-status', () => syncStatus);
+
+ipcMain.handle('sync-force', async () => {
+  if (!firebaseSync.isInitialized) {
+    const ok = await firebaseSync.initSync(store, (status) => {
+      syncStatus = status;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('sync-update', status);
+      }
+    });
+    if (!ok) return { success: false, error: 'Failed to connect' };
+  }
+  await firebaseSync.uploadAllSessions();
+  return { success: true };
+});
+
+ipcMain.handle('sync-download', async () => {
+  if (!firebaseSync.isInitialized) return { success: false, error: 'Not connected' };
+  const result = await firebaseSync.downloadAllSessions();
+  // Notify renderer to refresh accounts
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send('sync-accounts-updated', store.get('accounts') || []);
+  }
+  return { success: true, ...result };
+});
+
+// Register cookie-changed listener for an account's partition
+function registerCookieListener(accountId) {
+  const partitionName = `persist:of-${accountId}`;
+  if (cookieListeners.has(partitionName)) return;
+  cookieListeners.add(partitionName);
+
+  const ses = session.fromPartition(partitionName);
+  ses.cookies.on('changed', (_event, cookie, _cause, removed) => {
+    // Only care about onlyfans.com cookies being set (not removed)
+    if (removed) return;
+    const domain = cookie.domain || '';
+    if (!domain.includes('onlyfans.com')) return;
+
+    // Debounce: upload after a short delay
+    if (!registerCookieListener._timers) registerCookieListener._timers = {};
+    clearTimeout(registerCookieListener._timers[accountId]);
+    registerCookieListener._timers[accountId] = setTimeout(() => {
+      if (firebaseSync.isInitialized) {
+        firebaseSync.uploadSession(accountId).catch(() => {});
+      }
+    }, 5000); // 5s debounce
+  });
+}
+
+async function initFirebaseSync() {
+  const apiKey = store.get('apiKey');
+  if (!apiKey) return;
+
+  // Check if Firebase config is set (not placeholder)
+  try {
+    const syncModule = require('./firebase-sync');
+    await syncModule.initSync(store, (status) => {
+      syncStatus = status;
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('sync-update', status);
+      }
+    });
+
+    // Register cookie listeners for all existing accounts
+    const accounts = store.get('accounts') || [];
+    for (const acct of accounts) {
+      registerCookieListener(acct.id);
+    }
+  } catch (err) {
+    console.error('[Sync] Failed to init:', err.message);
+  }
+}
+
+app.whenReady().then(() => {
+  createWindow();
+  // Initialize Firebase sync after window is ready
+  initFirebaseSync();
+});
+app.on('window-all-closed', () => {
+  firebaseSync.stopSync();
+  app.quit();
+});
 app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
