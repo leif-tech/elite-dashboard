@@ -308,6 +308,14 @@ async function importSession(accountId, data, apiKey) {
     // Flush cookies to disk so they persist
     await ses.cookies.flushStore();
     console.log(`[Firebase Sync] Imported ${imported} cookies for ${accountId} (${failed} failed)`);
+
+    // Verify cookies were actually set
+    const verify = await ses.cookies.get({ url: 'https://onlyfans.com' });
+    console.log(`[Firebase Sync] Verify: ${verify.length} cookies now in partition for onlyfans.com`);
+    for (const c of verify) {
+      console.log(`  ${c.name} | ${c.domain} | hostOnly=${!c.domain.startsWith('.')} | value=${c.value.substring(0, 15)}...`);
+    }
+
     // Update local hash so we don't re-upload what we just downloaded
     lastUploadHashes.set(accountId, data.cookieHash);
     isImporting = false;

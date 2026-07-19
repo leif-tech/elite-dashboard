@@ -439,6 +439,12 @@ ipcMain.handle('sync-download', async () => {
   return { success: true, ...result };
 });
 
+ipcMain.handle('sync-debug-cookies', async (_, accountId) => {
+  const ses = session.fromPartition(`persist:of-${accountId}`);
+  const cookies = await ses.cookies.get({ url: 'https://onlyfans.com' });
+  return cookies.map(c => ({ name: c.name, domain: c.domain, value: c.value.substring(0, 20) }));
+});
+
 // Register cookie-changed listener for an account's partition
 function registerCookieListener(accountId) {
   const partitionName = `persist:of-${accountId}`;
