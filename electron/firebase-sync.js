@@ -134,17 +134,21 @@ async function uploadSession(accountId, force = false) {
   const ses = session.fromPartition(`persist:of-${accountId}`);
 
   try {
-    // Get all cookies for onlyfans.com
-    const allCookies = await ses.cookies.get({ domain: '.onlyfans.com' });
-    // Also get cookies without leading dot
-    const allCookies2 = await ses.cookies.get({ domain: 'onlyfans.com' });
+    // Get all cookies that would be sent to onlyfans.com
+    const allCookies = await ses.cookies.get({ url: 'https://onlyfans.com' });
 
-    // Merge and deduplicate
+    // Deduplicate by name+path — prefer host-only over domain cookies
     const cookieMap = new Map();
-    [...allCookies, ...allCookies2].forEach((c) => {
-      const key = `${c.name}|${c.domain}|${c.path}`;
-      cookieMap.set(key, c);
-    });
+    for (const c of allCookies) {
+      const key = `${c.name}|${c.path}`;
+      const existing = cookieMap.get(key);
+      if (!existing) {
+        cookieMap.set(key, c);
+      } else if (!c.domain.startsWith('.') && existing.domain.startsWith('.')) {
+        // Prefer host-only (no dot) over domain cookie (dot)
+        cookieMap.set(key, c);
+      }
+    }
 
     // Filter expired cookies
     const now = Date.now() / 1000;
@@ -154,6 +158,20 @@ async function uploadSession(accountId, force = false) {
     });
 
     if (cookies.length === 0) return;
+
+    // Clean up: remove domain-duplicate cookies from partition
+    if (force) {
+      const allForClean = await ses.cookies.get({ url: 'https://onlyfans.com' });
+      const hostOnlyNames = new Set(cookies.filter(c => !c.domain.startsWith('.')).map(c => c.name));
+      for (const c of allForClean) {
+        if (c.domain.startsWith('.') && hostOnlyNames.has(c.name)) {
+          try {
+            await ses.cookies.remove(`https://${c.domain.replace(/^\./, '')}${c.path}`, c.name);
+          } catch {}
+        }
+      }
+      await ses.cookies.flushStore();
+    }
 
     // Check if changed (skip if force)
     const hash = hashCookies(cookies);
