@@ -439,9 +439,10 @@ ipcMain.handle('sync-force', async () => {
 ipcMain.handle('sync-download', async () => {
   if (!firebaseSync.isInitialized) return { success: false, error: 'Not connected' };
   const result = await firebaseSync.downloadAllSessions(true); // force=true bypasses own-upload skip
-  // Notify renderer to refresh accounts
+  // Notify renderer to refresh accounts and signal sync complete
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sync-accounts-updated', store.get('accounts') || []);
+    mainWindow.webContents.send('sync-ready');
   }
   return { success: true, ...result };
 });
@@ -463,6 +464,13 @@ async function initFirebaseSync() {
         mainWindow.webContents.send('sync-update', status);
       }
     });
+    // After initial download completes, notify renderer to refresh account list
+    // This ensures any newly-synced accounts appear in the sidebar
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('sync-accounts-updated', store.get('accounts') || []);
+      // Signal that sync download is complete — webviews can now load with valid cookies
+      mainWindow.webContents.send('sync-ready');
+    }
   } catch (err) {
     console.error('[Sync] Failed to init:', err.message);
   }

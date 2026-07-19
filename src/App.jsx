@@ -33,6 +33,8 @@ export default function App() {
     setApiAccounts(Array.isArray(accts) ? accts : accts?.data || []);
   };
 
+  const [syncReady, setSyncReady] = useState(0); // increment to force webview remount
+
   useEffect(() => {
     if (window.electronAPI) {
       window.electronAPI.getAccounts().then((accts) => {
@@ -45,6 +47,10 @@ export default function App() {
       window.electronAPI.syncStatus().then((s) => setSyncStatus(s || { connected: false }));
       window.electronAPI.onSyncUpdate((status) => setSyncStatus(status));
       window.electronAPI.onSyncAccountsUpdated((accts) => setAccounts(accts || []));
+      // When sync download completes, force reload any active webview to pick up new cookies
+      if (window.electronAPI.onSyncReady) {
+        window.electronAPI.onSyncReady(() => setSyncReady((n) => n + 1));
+      }
     }
   }, []);
 
@@ -91,7 +97,7 @@ export default function App() {
       return <HomeView accounts={accounts} onSelect={setActiveId} onAdd={() => setAdding(true)} apiKeySet={apiKeySet} apiAccounts={apiAccounts} onApiKeyConnect={loadApiAccounts} syncStatus={syncStatus} />;
     }
     const acct = accounts.find((a) => a.id === activeId);
-    return <OFWebview accountId={activeId} proxy={acct?.proxy} onToggleProxy={() => toggleProxy(activeId)} />;
+    return <OFWebview key={`${activeId}-${syncReady}`} accountId={activeId} proxy={acct?.proxy} onToggleProxy={() => toggleProxy(activeId)} />;
   };
 
   return (

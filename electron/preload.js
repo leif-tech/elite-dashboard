@@ -30,6 +30,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.removeAllListeners('sync-accounts-updated');
     ipcRenderer.on('sync-accounts-updated', (_, accounts) => callback(accounts));
   },
+  onSyncReady: (callback) => {
+    ipcRenderer.removeAllListeners('sync-ready');
+    ipcRenderer.on('sync-ready', () => callback());
+  },
   // Auto-updater
   onUpdateAvailable: (callback) => {
     ipcRenderer.removeAllListeners('update-available');

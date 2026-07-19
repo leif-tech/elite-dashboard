@@ -163,33 +163,118 @@ async function exportCookies(accountId) {
   const ses = session.fromPartition(`persist:of-${accountId}`);
   const cookies = await ses.cookies.get({});
   // Only sync essential cookie fields (strip Electron internals)
-  return cookies.map(c => ({
-    url: `https://${c.domain.replace(/^\./, '')}${c.path}`,
-    name: c.name,
-    value: c.value,
-    domain: c.domain,
-    path: c.path,
-    secure: c.secure,
-    httpOnly: c.httpOnly,
-    expirationDate: c.expirationDate,
-    sameSite: c.sameSite || 'unspecified',
-  }));
+  // IMPORTANT: Carefully handle fields for cross-platform compatibility (Windows <-> macOS)
+  return cookies.filter(c => c.name && c.domain).map(c => {
+    const domain = c.domain || '';
+    const cookiePath = c.path || '/';
+    const host = domain.replace(/^\./, '');
+    const secure = c.secure !== false; // default to true for OnlyFans (HTTPS)
+
+    // Build cookie object — only include fields that have valid values
+    // Omitting expirationDate = session cookie (correct behavior)
+    const cookie = {
+      url: `https://${host}${cookiePath}`,
+      name: c.name,
+      value: c.value || '',
+      domain: domain,
+      path: cookiePath,
+      secure: secure,
+      httpOnly: c.httpOnly || false,
+    };
+
+    // Only include expirationDate if it's a real positive number (persistent cookie)
+    // Session cookies must NOT have this field — omitting it is the correct way
+    if (c.expirationDate && typeof c.expirationDate === 'number' && c.expirationDate > 0) {
+      cookie.expirationDate = c.expirationDate;
+    }
+
+    // sameSite handling for cross-platform compatibility:
+    // - "unspecified" means the server didn't set SameSite — map to "no_restriction" if secure (safest for cross-platform)
+    // - "no_restriction" (SameSite=None) REQUIRES secure=true or Chromium rejects it
+    // - "lax" and "strict" work on all platforms
+    const sameSite = c.sameSite || 'unspecified';
+    if (sameSite === 'unspecified' || sameSite === 'no_restriction') {
+      // Use no_restriction (SameSite=None) for secure cookies — this is the most permissive
+      // and ensures cookies are sent in all contexts (cross-site, embedded, etc.)
+      cookie.sameSite = secure ? 'no_restriction' : 'lax';
+    } else {
+      cookie.sameSite = sameSite; // "lax" or "strict"
+    }
+
+    return cookie;
+  });
 }
 
 async function importCookies(accountId, cookies) {
   if (!Array.isArray(cookies) || cookies.length === 0) return;
   const ses = session.fromPartition(`persist:of-${accountId}`);
-  // Clear existing cookies first to avoid stale duplicates
-  await ses.cookies.flushStore();
-  let imported = 0;
-  for (const cookie of cookies) {
+
+  // ACTUALLY clear existing cookies (flushStore only writes to disk, doesn't clear!)
+  const existing = await ses.cookies.get({});
+  for (const c of existing) {
     try {
-      await ses.cookies.set(cookie);
-      imported++;
+      const url = `https://${(c.domain || '').replace(/^\./, '')}${c.path || '/'}`;
+      await ses.cookies.remove(url, c.name);
     } catch {}
   }
+
+  let imported = 0;
+  let failed = 0;
+  const errors = [];
+  for (const cookie of cookies) {
+    try {
+      // Validate required fields before attempting set
+      if (!cookie.name || !cookie.url) {
+        failed++;
+        continue;
+      }
+
+      // Build a clean cookie object — only pass defined fields
+      const setCookie = {
+        url: cookie.url,
+        name: cookie.name,
+        value: cookie.value || '',
+        path: cookie.path || '/',
+        secure: cookie.secure !== false,
+        httpOnly: cookie.httpOnly || false,
+      };
+
+      // Domain: include if present (Chromium will normalize with leading dot)
+      if (cookie.domain) {
+        setCookie.domain = cookie.domain;
+      }
+
+      // expirationDate: only include for persistent cookies (must be positive number)
+      if (cookie.expirationDate && typeof cookie.expirationDate === 'number' && cookie.expirationDate > 0) {
+        setCookie.expirationDate = cookie.expirationDate;
+      }
+      // If no expirationDate, cookie is treated as session cookie (correct)
+
+      // sameSite: ensure no_restriction always paired with secure=true
+      if (cookie.sameSite === 'no_restriction') {
+        setCookie.sameSite = 'no_restriction';
+        setCookie.secure = true; // REQUIRED by Chromium for SameSite=None
+      } else if (cookie.sameSite === 'lax' || cookie.sameSite === 'strict') {
+        setCookie.sameSite = cookie.sameSite;
+      } else {
+        // "unspecified" or missing — use "lax" which is the safest cross-platform default
+        setCookie.sameSite = setCookie.secure ? 'no_restriction' : 'lax';
+      }
+
+      await ses.cookies.set(setCookie);
+      imported++;
+    } catch (err) {
+      failed++;
+      if (errors.length < 5) {
+        errors.push(`${cookie.name}@${cookie.domain}: ${err.message}`);
+      }
+    }
+  }
   await ses.cookies.flushStore();
-  console.log(`[Firebase Sync] Imported ${imported}/${cookies.length} cookies for ${accountId}`);
+  console.log(`[Firebase Sync] Imported ${imported}/${cookies.length} cookies for ${accountId} (${failed} failed)`);
+  if (errors.length > 0) {
+    console.warn(`[Firebase Sync] Sample cookie errors:`, errors);
+  }
 }
 
 // ============ CORE SYNC ============
