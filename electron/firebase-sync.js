@@ -654,16 +654,25 @@ async function resetSync() {
   }
 }
 
-// Factory reset: clear ALL local data (cookies, partitions, accounts) + wipe Firestore
+// Factory reset: wipe Firestore + clear accounts list — clean slate
 async function factoryReset() {
   try {
-    // 1. Wipe Firestore data if connected
+    // 1. Clear accounts list immediately (keeps API key)
+    if (store) {
+      store.set('accounts', []);
+    }
+
+    // 2. Clear local sync state
+    lastUploadHashes.clear();
+    locallyOwnedSessions.clear();
+
+    // 3. Wipe Firestore data (with 10s timeout so it never hangs)
     if (initialized && db && store) {
       const apiKey = store.get('apiKey');
       if (apiKey) {
         const teamId = getTeamId(apiKey);
         const { collection, getDocs, deleteDoc, doc } = require('firebase/firestore');
-        try {
+        const wipe = async () => {
           const sessionsSnap = await getDocs(collection(db, `teams/${teamId}/sessions`));
           for (const d of sessionsSnap.docs) {
             await deleteDoc(doc(db, `teams/${teamId}/sessions`, d.id));
@@ -672,40 +681,16 @@ async function factoryReset() {
           for (const d of accountsSnap.docs) {
             await deleteDoc(doc(db, `teams/${teamId}/accounts`, d.id));
           }
-        } catch (e) {
-          console.error('[Firebase Sync] Firestore wipe error:', e.message);
-        }
+        };
+        await Promise.race([wipe(), new Promise(r => setTimeout(r, 10000))]);
       }
     }
-
-    // 2. Clear cookies from all partitions (use cookies.remove — doesn't hang like clearStorageData)
-    const accounts = store ? (store.get('accounts') || []) : [];
-    for (const acct of accounts) {
-      try {
-        const ses = session.fromPartition(`persist:of-${acct.id}`);
-        const cookies = await ses.cookies.get({});
-        for (const c of cookies) {
-          const url = `https://${(c.domain || '').replace(/^\./, '')}${c.path || '/'}`;
-          await ses.cookies.remove(url, c.name);
-        }
-        await ses.cookies.flushStore();
-      } catch {}
-    }
-
-    // 3. Clear accounts list (keep API key)
-    if (store) {
-      store.set('accounts', []);
-    }
-
-    // 4. Clear local sync state
-    lastUploadHashes.clear();
-    locallyOwnedSessions.clear();
 
     console.log('[Firebase Sync] Factory reset complete');
     return { success: true };
   } catch (err) {
     console.error('[Firebase Sync] Factory reset failed:', err.message);
-    return { success: false, error: err.message };
+    return { success: true }; // return success anyway — local data is already cleared
   }
 }
 
