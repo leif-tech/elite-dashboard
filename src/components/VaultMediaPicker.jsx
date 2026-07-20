@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { listVaultMedia } from '../api';
 
 export default function VaultMediaPicker({ accountId, onConfirm, onClose }) {
@@ -8,14 +8,16 @@ export default function VaultMediaPicker({ accountId, onConfirm, onClose }) {
   const [loading, setLoading] = useState(false);
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(true);
+  const abortRef = useRef(null);
   const LIMIT = 20;
 
-  const fetchMedia = async (reset = false) => {
+  const fetchMedia = async (reset = false, signal) => {
     setLoading(true);
     const newOffset = reset ? 0 : offset;
     try {
       const type = filter === 'all' ? undefined : filter;
       const result = await listVaultMedia(accountId, { limit: LIMIT, offset: newOffset, type });
+      if (signal?.aborted) return;
       const items = Array.isArray(result) ? result : result.list || [];
       if (reset) {
         setMedia(items);
@@ -25,16 +27,21 @@ export default function VaultMediaPicker({ accountId, onConfirm, onClose }) {
       setHasMore(items.length === LIMIT);
       setOffset(newOffset + items.length);
     } catch (err) {
+      if (signal?.aborted) return;
       console.error('Vault fetch error:', err);
     }
-    setLoading(false);
+    if (!signal?.aborted) setLoading(false);
   };
 
   useEffect(() => {
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     setMedia([]);
     setOffset(0);
     setHasMore(true);
-    fetchMedia(true);
+    fetchMedia(true, ac.signal);
+    return () => ac.abort();
   }, [accountId, filter]);
 
   const toggleSelect = (item) => {
@@ -113,7 +120,7 @@ export default function VaultMediaPicker({ accountId, onConfirm, onClose }) {
           {/* Load more */}
           {hasMore && !loading && media.length > 0 && (
             <div className="text-center mt-4">
-              <button onClick={() => fetchMedia(false)} className="btn-ghost text-xs border border-dark-500 px-4 py-1.5">
+              <button onClick={() => fetchMedia(false, null)} className="btn-ghost text-xs border border-dark-500 px-4 py-1.5">
                 Load More
               </button>
             </div>

@@ -2,7 +2,7 @@ const { app, BrowserWindow, ipcMain, session, Menu, clipboard, shell } = require
 const path = require('path');
 const Store = require('electron-store').default;
 const firebaseSync = require('./firebase-sync');
-const { initAutoUpdater } = require('./updater');
+const { initAutoUpdater, stopAutoUpdater } = require('./updater');
 
 const CHROME_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
@@ -316,11 +316,13 @@ ipcMain.handle('check-all-login-status', async () => {
 
 // Save reordered accounts array
 ipcMain.handle('reorder-accounts', (_, accounts) => {
+  if (!Array.isArray(accounts)) return store.get('accounts') || [];
   store.set('accounts', accounts);
   return accounts;
 });
 
 ipcMain.handle('save-account', (_, account) => {
+  if (!account || typeof account.id !== 'string') return store.get('accounts') || [];
   const accounts = store.get('accounts');
   const idx = accounts.findIndex((a) => a.id === account.id);
   if (idx >= 0) accounts[idx] = { ...accounts[idx], ...account };
@@ -343,7 +345,9 @@ ipcMain.handle('remove-account', (_, id) => {
 });
 
 // ============ PROXY IPC ============
-ipcMain.handle('set-proxy', async (_, { accountId, proxy }) => {
+ipcMain.handle('set-proxy', async (_, data) => {
+  if (!data || typeof data.accountId !== 'string') return false;
+  const { accountId, proxy } = data;
   const accounts = store.get('accounts');
   const idx = accounts.findIndex((a) => a.id === accountId);
   const oldProxy = idx >= 0 ? accounts[idx].proxy : null;
@@ -491,8 +495,16 @@ app.whenReady().then(async () => {
 app.on('before-quit', async (e) => {
   if (firebaseSync.isInitialized) {
     e.preventDefault();
-    await firebaseSync.uploadAllSessions(false);
+    try {
+      await Promise.race([
+        firebaseSync.uploadAllSessions(false),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Quit sync timeout')), 5000)),
+      ]);
+    } catch (err) {
+      console.error('[Sync] Quit sync failed:', err.message);
+    }
     firebaseSync.stopSync();
+    stopAutoUpdater();
     app.exit();
   }
 });

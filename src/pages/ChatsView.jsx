@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { listChats } from '../api';
 
 export default function ChatsView({ apiAccounts }) {
@@ -8,18 +8,24 @@ export default function ChatsView({ apiAccounts }) {
   const [filter, setFilter] = useState('all');
   const [offset, setOffset] = useState(0);
   const [hasMore, setHasMore] = useState(true);
+  const abortRef = useRef(null);
   const LIMIT = 20;
 
   useEffect(() => {
     if (!selectedAcct) { setChats([]); return; }
     loadChats(true);
+    return () => { abortRef.current?.abort(); };
   }, [selectedAcct]);
 
   const loadChats = async (reset = false) => {
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
     setLoading(true);
     const newOffset = reset ? 0 : offset;
     try {
       const result = await listChats(selectedAcct, { limit: LIMIT, offset: newOffset });
+      if (ac.signal.aborted) return;
       const items = Array.isArray(result) ? result : result.list || [];
       if (reset) {
         setChats(items);
@@ -30,9 +36,10 @@ export default function ChatsView({ apiAccounts }) {
       }
       setHasMore(items.length === LIMIT);
     } catch (err) {
+      if (ac.signal.aborted) return;
       console.error('Chats fetch error:', err);
     }
-    setLoading(false);
+    if (!ac.signal.aborted) setLoading(false);
   };
 
   const timeAgo = (dateStr) => {

@@ -45,11 +45,16 @@ export default function ProxySettingsView({ accounts }) {
     if (!form.host || !form.port) return;
     setTesting(true);
     setTestResult(null);
-    const api = window.electronAPI;
-    if (!api?.testProxy) { setTesting(false); return; }
-    const result = await api.testProxy({ proxy: form });
-    setTestResult(result);
-    setTesting(false);
+    try {
+      const api = window.electronAPI;
+      if (!api?.testProxy) return;
+      const result = await api.testProxy({ proxy: form });
+      setTestResult(result);
+    } catch (err) {
+      setTestResult({ success: false, error: err.message || 'Test failed' });
+    } finally {
+      setTesting(false);
+    }
   };
 
   const handleSave = async () => {
@@ -57,9 +62,14 @@ export default function ProxySettingsView({ accounts }) {
     const api = window.electronAPI;
     if (!api?.setProxy) return;
     setSaving(true);
-    await api.setProxy({ accountId: selectedId, proxy: form });
-    setSaving(false);
-    setSaved(true);
+    try {
+      await api.setProxy({ accountId: selectedId, proxy: form });
+      setSaved(true);
+    } catch (err) {
+      console.error('Failed to save proxy:', err);
+    } finally {
+      setSaving(false);
+    }
   };
 
   const handleClear = async () => {

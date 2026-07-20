@@ -1,6 +1,8 @@
 const { autoUpdater } = require('electron-updater');
 const { app, dialog, BrowserWindow } = require('electron');
 
+let updateInterval = null;
+
 function initAutoUpdater() {
   if (!app.isPackaged) {
     console.log('[Updater] Skipping update check in dev mode');
@@ -31,7 +33,8 @@ function initAutoUpdater() {
 
   autoUpdater.on('update-downloaded', (info) => {
     console.log('[Updater] Update downloaded:', info.version);
-    dialog.showMessageBox({
+    const parentWin = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0] || null;
+    dialog.showMessageBox(parentWin, {
       type: 'info',
       title: 'Update Ready',
       message: `Version ${info.version} has been downloaded.`,
@@ -54,9 +57,16 @@ function initAutoUpdater() {
   }, 3000);
 
   // Check every 30 minutes
-  setInterval(() => {
+  updateInterval = setInterval(() => {
     autoUpdater.checkForUpdates().catch(() => {});
   }, 30 * 60 * 1000);
 }
 
-module.exports = { initAutoUpdater };
+function stopAutoUpdater() {
+  if (updateInterval) {
+    clearInterval(updateInterval);
+    updateInterval = null;
+  }
+}
+
+module.exports = { initAutoUpdater, stopAutoUpdater };

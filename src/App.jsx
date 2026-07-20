@@ -1,14 +1,17 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import './index.css';
 import ProxySettingsView from './pages/ProxySettingsView';
 import MassMessagesView from './pages/MassMessagesView';
 import ChatsView from './pages/ChatsView';
-import { setApiKey, getApiKey, listAccounts as apiListAccounts } from './api';
+import HomeView from './pages/HomeView';
+import OFWebview from './components/OFWebview';
+import { setApiKey, listAccounts as apiListAccounts } from './api';
 
 export default function App() {
   const [accounts, setAccounts] = useState([]);
   const [activeId, _setActiveId] = useState(null);
   const [loginStatus, setLoginStatus] = useState({});
+  const [isLoading, setIsLoading] = useState(true);
   const [dragId, setDragId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
 
@@ -72,13 +75,15 @@ export default function App() {
 
   useEffect(() => {
     if (window.electronAPI) {
-      window.electronAPI.getAccounts().then((accts) => {
-        setAccounts(accts || []);
-      });
-      window.electronAPI.getApiKey().then((key) => {
-        if (key) loadApiAccounts(key).catch(() => {});
-      });
-      window.electronAPI.syncStatus().then((s) => setSyncStatus(s || { connected: false }));
+      Promise.all([
+        window.electronAPI.getAccounts().then((accts) => {
+          setAccounts(accts || []);
+        }),
+        window.electronAPI.getApiKey().then((key) => {
+          if (key) return loadApiAccounts(key).catch(() => {});
+        }),
+        window.electronAPI.syncStatus().then((s) => setSyncStatus(s || { connected: false })),
+      ]).finally(() => setIsLoading(false));
       window.electronAPI.onSyncUpdate((status) => setSyncStatus(status));
       window.electronAPI.onSyncAccountsUpdated((accts) => {
         setAccounts(accts || []);
@@ -86,24 +91,34 @@ export default function App() {
       });
       // Initial login status check (after sync has completed)
       setTimeout(refreshLoginStatus, 2000);
+    } else {
+      setIsLoading(false);
     }
   }, []);
 
   const addAccount = async () => {
     const id = `acct_${Date.now()}`;
     const newAcct = { id, name: editName || `Account ${accounts.length + 1}` };
-    const updated = await window.electronAPI.saveAccount(newAcct);
-    setAccounts(updated);
-    setActiveId(id);
-    setAdding(false);
-    setEditName('');
+    try {
+      const updated = await window.electronAPI.saveAccount(newAcct);
+      setAccounts(updated);
+      setActiveId(id);
+      setAdding(false);
+      setEditName('');
+    } catch (err) {
+      console.error('Failed to add account:', err);
+    }
   };
 
   const removeAccount = async (id) => {
-    const updated = await window.electronAPI.removeAccount(id);
-    setAccounts(updated);
-    if (activeId === id) setActiveId(null);
-    setConfirmRemove(null);
+    try {
+      const updated = await window.electronAPI.removeAccount(id);
+      setAccounts(updated);
+      if (activeId === id) setActiveId(null);
+      setConfirmRemove(null);
+    } catch (err) {
+      console.error('Failed to remove account:', err);
+    }
   };
 
   const active = accounts.find((a) => a.id === activeId);
@@ -112,9 +127,13 @@ export default function App() {
     const acct = accounts.find((a) => a.id === accountId);
     if (!acct?.proxy) return;
     const updated = { ...acct.proxy, enabled: !acct.proxy.enabled };
-    await window.electronAPI.setProxy({ accountId, proxy: updated });
-    const accts = await window.electronAPI.getAccounts();
-    setAccounts(accts || []);
+    try {
+      await window.electronAPI.setProxy({ accountId, proxy: updated });
+      const accts = await window.electronAPI.getAccounts();
+      setAccounts(accts || []);
+    } catch (err) {
+      console.error('Failed to toggle proxy:', err);
+    }
   };
 
   const renderMain = () => {
@@ -145,6 +164,14 @@ export default function App() {
     const acct = accounts.find((a) => a.id === activeId);
     return <OFWebview key={activeId} accountId={activeId} proxy={acct?.proxy} onToggleProxy={() => toggleProxy(activeId)} />;
   };
+
+  if (isLoading) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-dark-900">
+        <div className="text-gray-500 text-sm">Loading...</div>
+      </div>
+    );
+  }
 
   return (
     <div className="h-screen flex flex-col">
@@ -348,378 +375,6 @@ export default function App() {
         {renderMain()}
       </main>
       </div>
-    </div>
-  );
-}
-
-// Home / landing page
-function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyConnect, syncStatus, onSyncNow, onFactoryReset }) {
-  const [keyInput, setKeyInput] = useState('');
-  const [connecting, setConnecting] = useState(false);
-  const [error, setError] = useState('');
-  const [syncing, setSyncing] = useState(false);
-
-  const handleConnect = async () => {
-    const trimmed = keyInput.trim();
-    if (!trimmed) return;
-    setConnecting(true);
-    setError('');
-    try {
-      await onApiKeyConnect(trimmed);
-      setKeyInput('');
-    } catch (e) {
-      setError('Invalid API key. Check your key and try again.');
-    }
-    setConnecting(false);
-  };
-
-  return (
-    <div className="p-8 overflow-y-auto h-full">
-      <h2 className="text-xl font-bold mb-1">Welcome</h2>
-      <p className="text-sm text-gray-500 mb-6">Select an account from the sidebar to browse OnlyFans, or add a new one.</p>
-
-      {/* API Key Setup / Connected Models */}
-      {!apiKeySet ? (
-        <div className="card max-w-lg mb-8 p-6">
-          <div className="flex items-center gap-3 mb-3">
-            <div className="w-10 h-10 rounded-lg bg-accent/10 flex items-center justify-center">
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className="text-accent">
-                <path d="M21 2l-2 2m-7.61 7.61a5.5 5.5 0 1 1-7.778 7.778 5.5 5.5 0 0 1 7.777-7.777zm0 0L15.5 7.5m0 0l3 3L22 7l-3-3m-3.5 3.5L19 4"/>
-              </svg>
-            </div>
-            <div>
-              <h3 className="font-semibold text-sm">Connect Your API</h3>
-              <p className="text-xs text-gray-500">Share this key with your team to sync model accounts</p>
-            </div>
-          </div>
-          <input
-            className="input w-full text-sm py-2.5 mb-2"
-            placeholder="Paste your OnlyFansAPI key..."
-            value={keyInput}
-            onChange={(e) => setKeyInput(e.target.value)}
-            onKeyDown={(e) => e.key === 'Enter' && handleConnect()}
-            type="password"
-          />
-          {error && <p className="text-xs text-red-400 mb-2">{error}</p>}
-          <div className="flex items-center justify-between">
-            <a
-              href="#"
-              onClick={(e) => { e.preventDefault(); window.electronAPI?.openExternal('https://app.onlyfansapi.com/api-keys'); }}
-              className="text-xs text-accent hover:underline"
-            >
-              Get your key at app.onlyfansapi.com
-            </a>
-            <button
-              onClick={handleConnect}
-              disabled={!keyInput.trim() || connecting}
-              className="btn-primary text-xs py-2 px-4 disabled:opacity-50"
-            >
-              {connecting ? 'Connecting...' : 'Connect'}
-            </button>
-          </div>
-        </div>
-      ) : (
-        <div className="mb-8">
-          <div className="flex items-center gap-2 mb-3">
-            <div className="w-2 h-2 rounded-full bg-green-500" />
-            <h3 className="text-sm font-semibold text-gray-300">Connected Models</h3>
-            <span className="text-xs text-gray-600">({apiAccounts.length})</span>
-          </div>
-          {apiAccounts.length > 0 ? (
-            <div className="grid grid-cols-2 xl:grid-cols-3 gap-3">
-              {apiAccounts.map((acct) => (
-                <div key={acct.id} className="card p-4 flex items-center gap-3">
-                  {acct.avatar ? (
-                    <img src={acct.avatar} className="w-10 h-10 rounded-full object-cover" alt="" />
-                  ) : (
-                    <div className="w-10 h-10 rounded-full bg-accent/20 flex items-center justify-center text-sm font-bold text-accent">
-                      {(acct.display_name || acct.onlyfans_username || '?')[0].toUpperCase()}
-                    </div>
-                  )}
-                  <div className="min-w-0">
-                    <p className="text-sm font-medium truncate">{acct.display_name || acct.onlyfans_username || acct.id}</p>
-                    {acct.onlyfans_username && (
-                      <p className="text-xs text-gray-500 truncate">@{acct.onlyfans_username}</p>
-                    )}
-                  </div>
-                  <div className="ml-auto">
-                    <div className={`w-2.5 h-2.5 rounded-full ${acct.is_active !== false ? 'bg-green-500' : 'bg-yellow-500'}`} title={acct.is_active !== false ? 'Active' : 'Inactive'} />
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <p className="text-sm text-gray-500">API connected but no model accounts found. Connect models at app.onlyfansapi.com.</p>
-          )}
-        </div>
-      )}
-
-      {/* Session Sync Card */}
-      {apiKeySet && (
-        <div className="card max-w-lg mb-8 p-5">
-          <div className="flex items-center gap-3 mb-3">
-            <div className={`w-10 h-10 rounded-lg flex items-center justify-center ${syncStatus.connected ? 'bg-green-500/10' : 'bg-red-500/10'}`}>
-              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={syncStatus.connected ? 'text-green-400' : 'text-red-400'}>
-                <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
-              </svg>
-            </div>
-            <div className="flex-1">
-              <h3 className="font-semibold text-sm">Session Sync</h3>
-              <p className="text-xs text-gray-500">
-                {syncStatus.connected
-                  ? `Auto-syncing every 30s${syncStatus.lastSync ? ' · Last: ' + new Date(syncStatus.lastSync).toLocaleTimeString() : ''}${syncStatus.accounts ? ' · ' + syncStatus.accounts + ' accounts' : ''}`
-                  : syncStatus.error || 'Disconnected'}
-              </p>
-            </div>
-            <div className={`w-3 h-3 rounded-full ${syncStatus.connected ? 'bg-green-500' : 'bg-red-500'}`} />
-          </div>
-          <div className="flex items-center gap-2">
-            <button
-              onClick={async () => {
-                setSyncing(true);
-                try { await onSyncNow(); } catch {}
-                setSyncing(false);
-              }}
-              disabled={syncing}
-              className="btn-ghost text-xs py-1.5 px-3 disabled:opacity-50"
-            >
-              {syncing ? 'Syncing...' : 'Sync Now'}
-            </button>
-            <button
-              onClick={async () => {
-                setSyncing(true);
-                try { await onFactoryReset(); } catch {}
-                setSyncing(false);
-              }}
-              disabled={syncing}
-              className="btn-ghost text-xs py-1.5 px-3 text-red-500 disabled:opacity-50"
-            >
-              Factory Reset
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Browser Accounts */}
-      <h3 className="text-sm font-semibold text-gray-300 mb-3">Browser Accounts</h3>
-      {accounts.length === 0 ? (
-        <div className="card text-center py-12 max-w-md mx-auto">
-          <div className="text-4xl mb-4 text-gray-600">+</div>
-          <p className="text-gray-400 mb-2">No browser accounts yet.</p>
-          <p className="text-sm text-gray-600 mb-4">Add an account to browse OnlyFans directly.</p>
-          <button onClick={onAdd} className="btn-primary">Add Account</button>
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 xl:grid-cols-3 gap-4">
-          {accounts.map((acct) => (
-            <button
-              key={acct.id}
-              onClick={() => onSelect(acct.id)}
-              className="card hover:border-accent/40 transition-colors text-left"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-full bg-dark-500 flex items-center justify-center text-lg font-bold text-gray-400">
-                  {(acct.name || '?')[0].toUpperCase()}
-                </div>
-                <div>
-                  <p className="font-semibold">{acct.name}</p>
-                  <p className="text-xs text-gray-500">Click to open OnlyFans</p>
-                </div>
-              </div>
-            </button>
-          ))}
-        </div>
-      )}
-    </div>
-  );
-}
-
-// Embedded OF browser per account — with tabs
-function OFWebview({ accountId, proxy, onToggleProxy }) {
-  const [tabs, setTabs] = useState([{ id: 1, title: 'OnlyFans', url: 'https://onlyfans.com' }]);
-  const [activeTab, setActiveTab] = useState(1);
-  const nextId = useRef(2);
-
-  useEffect(() => {
-    if (!window.electronAPI?.onOpenNewTab) return;
-    const handler = (url) => {
-      const id = nextId.current++;
-      setTabs((prev) => [...prev, { id, title: 'Loading...', url }]);
-      setActiveTab(id);
-    };
-    window.electronAPI.onOpenNewTab(handler);
-  }, []);
-
-  useEffect(() => {
-    setTabs([{ id: 1, title: 'OnlyFans', url: 'https://onlyfans.com' }]);
-    setActiveTab(1);
-    nextId.current = 2;
-  }, [accountId]);
-
-  const closeTab = (id) => {
-    const filtered = tabs.filter((t) => t.id !== id);
-    if (filtered.length === 0) {
-      setTabs([{ id: 1, title: 'OnlyFans', url: 'https://onlyfans.com' }]);
-      setActiveTab(1);
-    } else {
-      setTabs(filtered);
-      if (activeTab === id) setActiveTab(filtered[filtered.length - 1].id);
-    }
-  };
-
-  const addTab = () => {
-    const id = nextId.current++;
-    setTabs((prev) => [...prev, { id, title: 'New Tab', url: 'https://onlyfans.com' }]);
-    setActiveTab(id);
-  };
-
-  const updateTabTitle = (id, title) => {
-    setTabs((prev) => prev.map((t) => t.id === id ? { ...t, title } : t));
-  };
-
-  return (
-    <div className="flex flex-col h-full">
-      {tabs.length > 1 && (
-        <div className="flex items-center bg-dark-900 border-b border-dark-600 px-1 shrink-0">
-          {tabs.map((tab) => (
-            <div
-              key={tab.id}
-              className={`group flex items-center gap-1.5 max-w-[180px] px-3 py-1.5 text-xs cursor-pointer border-b-2 transition-colors ${
-                activeTab === tab.id
-                  ? 'border-accent text-white bg-dark-800'
-                  : 'border-transparent text-gray-500 hover:text-gray-300 hover:bg-dark-800/50'
-              }`}
-              onClick={() => setActiveTab(tab.id)}
-            >
-              <span className="truncate">{tab.title}</span>
-              <button
-                onClick={(e) => { e.stopPropagation(); closeTab(tab.id); }}
-                className="text-gray-600 hover:text-red-400 opacity-0 group-hover:opacity-100 transition-opacity shrink-0"
-              >
-                &times;
-              </button>
-            </div>
-          ))}
-          <button
-            onClick={addTab}
-            className="px-2 py-1.5 text-gray-600 hover:text-white transition-colors text-sm"
-            title="New tab"
-          >
-            +
-          </button>
-        </div>
-      )}
-
-      {tabs.map((tab) => (
-        <TabWebview
-          key={`${accountId}-${tab.id}`}
-          accountId={accountId}
-          tabId={tab.id}
-          initialUrl={tab.url}
-          isActive={activeTab === tab.id}
-          proxy={proxy}
-          onToggleProxy={onToggleProxy}
-          onTitleChange={(title) => updateTabTitle(tab.id, title)}
-        />
-      ))}
-    </div>
-  );
-}
-
-// Single tab's webview + toolbar
-function TabWebview({ accountId, tabId, initialUrl, isActive, proxy, onToggleProxy, onTitleChange }) {
-  const webviewRef = useRef(null);
-  const [url, setUrl] = useState(initialUrl);
-  const [canGoBack, setCanGoBack] = useState(false);
-  const [canGoForward, setCanGoForward] = useState(false);
-  const [loading, setLoading] = useState(true);
-
-  useEffect(() => {
-    const wv = webviewRef.current;
-    if (!wv) return;
-
-    const onNavigation = () => {
-      const currentUrl = wv.getURL();
-      setUrl(currentUrl);
-      setCanGoBack(wv.canGoBack());
-      setCanGoForward(wv.canGoForward());
-    };
-
-    const onStartLoad = () => setLoading(true);
-    const onStopLoad = () => {
-      setLoading(false);
-      onNavigation();
-      try {
-        const title = wv.getTitle();
-        if (title) onTitleChange(title.length > 25 ? title.slice(0, 25) + '...' : title);
-      } catch {}
-    };
-
-    wv.addEventListener('did-navigate', onNavigation);
-    wv.addEventListener('did-navigate-in-page', onNavigation);
-    wv.addEventListener('did-start-loading', onStartLoad);
-    wv.addEventListener('did-stop-loading', onStopLoad);
-
-    return () => {
-      wv.removeEventListener('did-navigate', onNavigation);
-      wv.removeEventListener('did-navigate-in-page', onNavigation);
-      wv.removeEventListener('did-start-loading', onStartLoad);
-      wv.removeEventListener('did-stop-loading', onStopLoad);
-    };
-  }, [tabId]);
-
-  const goBack = () => webviewRef.current?.goBack();
-  const goForward = () => webviewRef.current?.goForward();
-  const reload = () => webviewRef.current?.reload();
-  const goHome = () => webviewRef.current?.loadURL('https://onlyfans.com');
-
-  return (
-    <div className={`flex flex-col ${isActive ? 'flex-1' : 'hidden'}`}>
-      <div className="flex items-center gap-2 px-3 py-2 bg-dark-800 border-b border-dark-600">
-        <button onClick={goBack} disabled={!canGoBack} className="p-1.5 rounded hover:bg-dark-600 disabled:opacity-30 transition-colors">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-        </button>
-        <button onClick={goForward} disabled={!canGoForward} className="p-1.5 rounded hover:bg-dark-600 disabled:opacity-30 transition-colors">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        </button>
-        <button onClick={reload} className="p-1.5 rounded hover:bg-dark-600 transition-colors">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={loading ? 'animate-spin' : ''}>
-            <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
-          </svg>
-        </button>
-        <button onClick={goHome} className="p-1.5 rounded hover:bg-dark-600 transition-colors" title="OnlyFans Home">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-        </button>
-
-        <div className="flex-1 bg-dark-900 rounded-lg px-3 py-1.5 text-xs text-gray-500 truncate border border-dark-600">
-          {url}
-        </div>
-
-        {proxy && (
-          <button
-            onClick={onToggleProxy}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-              proxy.enabled
-                ? 'border-green-600/40 text-green-400 hover:bg-green-600/10'
-                : 'border-dark-500 text-gray-500 hover:bg-dark-600'
-            }`}
-            title={proxy.enabled ? 'Proxy active — click to disable' : 'Proxy disabled — click to enable'}
-          >
-            <div className={`w-2 h-2 rounded-full ${proxy.enabled ? 'bg-green-500' : 'bg-gray-600'}`} />
-            {proxy.enabled ? 'Proxy ON' : 'Proxy OFF'}
-          </button>
-        )}
-      </div>
-
-      <webview
-        ref={webviewRef}
-        src={initialUrl}
-        partition={`persist:of-${accountId}`}
-        useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
-        className="flex-1"
-        style={{ width: '100%', height: '100%' }}
-        allowpopups="true"
-      />
     </div>
   );
 }

@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import {
   sendMassMessage,
   listMassMessageQueue,
@@ -22,30 +22,39 @@ export default function MassMessagesView({ apiAccounts }) {
   const [sending, setSending] = useState(false);
   const [queue, setQueue] = useState([]);
   const [queueLoading, setQueueLoading] = useState(false);
+  const abortRef = useRef(null);
 
   // Load queue when account changes
   useEffect(() => {
-    if (!selectedAcct) { setQueue([]); return; }
-    loadQueue();
-    loadUserLists();
+    if (!selectedAcct) { setQueue([]); setUserLists([]); return; }
+    abortRef.current?.abort();
+    const ac = new AbortController();
+    abortRef.current = ac;
+    loadQueue(ac.signal);
+    loadUserLists(ac.signal);
+    return () => ac.abort();
   }, [selectedAcct]);
 
-  const loadQueue = async () => {
+  const loadQueue = async (signal) => {
     setQueueLoading(true);
     try {
       const result = await listMassMessageQueue(selectedAcct);
+      if (signal?.aborted) return;
       setQueue(Array.isArray(result) ? result : result.list || []);
     } catch (err) {
+      if (signal?.aborted) return;
       console.error('Queue fetch error:', err);
     }
-    setQueueLoading(false);
+    if (!signal?.aborted) setQueueLoading(false);
   };
 
-  const loadUserLists = async () => {
+  const loadUserLists = async (signal) => {
     try {
       const result = await listUserLists(selectedAcct);
+      if (signal?.aborted) return;
       setUserLists(Array.isArray(result) ? result : result.list || []);
     } catch {
+      if (signal?.aborted) return;
       setUserLists([]);
     }
   };
@@ -73,7 +82,7 @@ export default function MassMessagesView({ apiAccounts }) {
       setScheduleEnabled(false);
       setScheduleDate('');
       // Refresh queue
-      loadQueue();
+      loadQueue(null);
     } catch (err) {
       alert('Send failed: ' + err.message);
     }
@@ -261,7 +270,7 @@ export default function MassMessagesView({ apiAccounts }) {
             <div className="card">
               <div className="flex items-center justify-between mb-4">
                 <h3 className="text-sm font-semibold text-gray-300">Message Queue</h3>
-                <button onClick={loadQueue} className="text-xs text-gray-500 hover:text-accent">Refresh</button>
+                <button onClick={() => loadQueue(null)} className="text-xs text-gray-500 hover:text-accent">Refresh</button>
               </div>
 
               {queueLoading ? (
