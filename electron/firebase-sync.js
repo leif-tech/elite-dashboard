@@ -10,7 +10,7 @@ let initialized = false;
 let store = null;
 let autoUploadInterval = null;
 let syncStatusCallback = null;
-let lastUploadHashes = new Map(); // accountId -> hash
+let lastUploadHashes = new Map();
 let cachedDerivedKey = null;
 let cachedKeySource = null;
 
@@ -46,9 +46,7 @@ function encrypt(data, apiKey) {
 }
 
 function decrypt(data, apiKey) {
-  if (!Buffer.isBuffer(data) || data.length < 29) {
-    throw new Error('Invalid encrypted data');
-  }
+  if (!Buffer.isBuffer(data) || data.length < 29) throw new Error('Invalid encrypted data');
   const key = deriveKey(apiKey);
   const iv = data.subarray(0, 12);
   const authTag = data.subarray(12, 28);
@@ -139,6 +137,7 @@ function unpackPartition(accountId, compressed) {
     written++;
   }
   console.log(`[Sync] Unpacked ${written} files for ${accountId}`);
+  return written;
 }
 
 // ============ COOKIES ============
@@ -176,10 +175,11 @@ async function exportCookies(accountId) {
 }
 
 async function importCookies(accountId, cookies) {
-  if (!Array.isArray(cookies) || cookies.length === 0) return;
+  if (!Array.isArray(cookies) || cookies.length === 0) return { imported: 0, failed: 0 };
   const ses = session.fromPartition(`persist:of-${accountId}`);
 
   let imported = 0, failed = 0;
+  const errors = [];
   for (const cookie of cookies) {
     try {
       if (!cookie.name || !cookie.url) { failed++; continue; }
@@ -205,10 +205,15 @@ async function importCookies(accountId, cookies) {
       }
       await ses.cookies.set(setCookie);
       imported++;
-    } catch { failed++; }
+    } catch (err) {
+      failed++;
+      if (errors.length < 3) errors.push(`${cookie.name}@${cookie.domain}: ${err.message}`);
+    }
   }
   await ses.cookies.flushStore();
-  console.log(`[Sync] Imported ${imported}/${cookies.length} cookies for ${accountId} (${failed} failed)`);
+  console.log(`[Sync] Cookies for ${accountId}: ${imported} imported, ${failed} failed of ${cookies.length}`);
+  if (errors.length > 0) console.warn(`[Sync] Cookie errors:`, errors);
+  return { imported, failed };
 }
 
 // ============ CORE ============
@@ -237,8 +242,6 @@ async function initSync(electronStore, statusCb) {
     initialized = true;
     const accounts = store.get('accounts') || [];
     emitStatus({ connected: true, lastSync: null, accounts: accounts.length });
-
-    // Auto-upload every 60s to keep Firestore current
     startAutoUpload();
 
     return true;
@@ -270,14 +273,14 @@ async function uploadSession(accountId, force = false) {
   if (!apiKey) return;
 
   try {
+    // Flush cookies to disk before export
     const ses = session.fromPartition(`persist:of-${accountId}`);
     await ses.cookies.flushStore();
-    await new Promise(r => setTimeout(r, 300));
+    await new Promise(r => setTimeout(r, 500)); // wait for LevelDB flush too
 
     const cookies = await exportCookies(accountId);
     const packed = packPartition(accountId);
 
-    // Only upload if there's actual data (cookies from a logged-in session)
     if (cookies.length === 0) {
       console.log(`[Sync] Skipping upload for ${accountId} — no cookies`);
       return;
@@ -322,7 +325,7 @@ async function uploadSession(accountId, force = false) {
 
     lastUploadHashes.set(accountId, hash);
     emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: accounts.length });
-    console.log(`[Sync] Uploaded ${accountId} (${cookies.length} cookies, ${Math.round(b64.length / 1024)}KB)`);
+    console.log(`[Sync] Uploaded ${accountId}: ${cookies.length} cookies, ${packed ? 'with' : 'no'} partition data, ${Math.round(b64.length / 1024)}KB`);
   } catch (err) {
     console.error(`[Sync] Upload failed for ${accountId}:`, err.message);
   }
@@ -331,12 +334,14 @@ async function uploadSession(accountId, force = false) {
 async function uploadAllSessions(force = false) {
   if (!initialized || !store) return;
   const accounts = store.get('accounts') || [];
+  console.log(`[Sync] Uploading ${accounts.length} accounts...`);
   for (const acct of accounts) {
     await uploadSession(acct.id, force);
   }
+  console.log(`[Sync] Upload complete`);
 }
 
-// ============ DOWNLOAD (Force Download only — no auto-download) ============
+// ============ DOWNLOAD ============
 async function downloadAllSessions() {
   if (!initialized || !db || !store) return null;
 
@@ -348,12 +353,14 @@ async function downloadAllSessions() {
   try {
     const { collection, getDocs } = require('firebase/firestore');
 
-    // Get remote accounts — this becomes the ONLY source of truth
+    // Get remote accounts
     const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
     const remoteAccounts = [];
     accountsSnap.forEach(d => remoteAccounts.push(d.data()));
 
-    // Replace local account list with remote (clean slate)
+    console.log(`[Sync] Found ${remoteAccounts.length} remote accounts: ${remoteAccounts.map(a => a.name).join(', ')}`);
+
+    // Replace local account list with remote
     const localAccounts = remoteAccounts.map(r => ({ id: r.id, name: r.name }));
     store.set('accounts', localAccounts);
 
@@ -364,6 +371,7 @@ async function downloadAllSessions() {
     for (const docSnap of sessionsSnap.docs) {
       const data = docSnap.data();
       const accountId = docSnap.id;
+      const acctName = remoteAccounts.find(a => a.id === accountId)?.name || accountId;
 
       try {
         if (data.version === 2 && data.data) {
@@ -371,11 +379,28 @@ async function downloadAllSessions() {
           const compressed = decrypt(encrypted, apiKey);
           const json = zlib.gunzipSync(compressed).toString('utf8');
           const payload = JSON.parse(json);
-          if (payload.cookies) await importCookies(accountId, payload.cookies);
-          if (payload.partition) unpackPartition(accountId, Buffer.from(payload.partition, 'base64'));
+
+          // CRITICAL: Write partition files FIRST, BEFORE importing cookies
+          // session.fromPartition() initializes Local Storage from disk on first access
+          // If we import cookies first, it creates the session with empty Local Storage
+          // Then the partition files we write later get ignored
+          let filesWritten = 0;
+          if (payload.partition) {
+            filesWritten = unpackPartition(accountId, Buffer.from(payload.partition, 'base64'));
+          }
+
+          // NOW import cookies — this creates the session partition
+          // Local Storage will be loaded from the files we just wrote
+          let cookieResult = { imported: 0, failed: 0 };
+          if (payload.cookies) {
+            cookieResult = await importCookies(accountId, payload.cookies);
+          }
+
           lastUploadHashes.set(accountId, data.dataHash || '');
           syncedCount++;
+          console.log(`[Sync] Downloaded ${acctName}: ${cookieResult.imported} cookies, ${filesWritten} files`);
         } else if (data.partition) {
+          // v1 legacy format
           const encrypted = Buffer.from(data.partition, 'base64');
           const compressed = decrypt(encrypted, apiKey);
           unpackPartition(accountId, compressed);
@@ -383,12 +408,12 @@ async function downloadAllSessions() {
           syncedCount++;
         }
       } catch (err) {
-        console.error(`[Sync] Import failed for ${accountId}:`, err.message);
+        console.error(`[Sync] Import failed for ${acctName} (${accountId}):`, err.message);
       }
     }
 
     emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: localAccounts.length });
-    console.log(`[Sync] Downloaded ${syncedCount} sessions`);
+    console.log(`[Sync] Download complete: ${syncedCount}/${sessionsSnap.docs.length} sessions imported`);
     return { syncedCount, accounts: localAccounts };
   } catch (err) {
     console.error('[Sync] Download failed:', err.message);
@@ -406,11 +431,9 @@ function startAutoUpload() {
 
 // ============ FACTORY RESET ============
 async function factoryReset() {
-  // 1. Clear local data immediately
   if (store) store.set('accounts', []);
   lastUploadHashes.clear();
 
-  // 2. Wipe Firestore
   if (initialized && db && store) {
     const apiKey = store.get('apiKey');
     if (apiKey) {
@@ -431,6 +454,42 @@ async function factoryReset() {
   return { success: true };
 }
 
+// ============ DIAGNOSTICS ============
+async function getDiagnostics() {
+  const accounts = store ? (store.get('accounts') || []) : [];
+  const results = [];
+  for (const acct of accounts) {
+    const partDir = getPartitionPath(acct.id);
+    const partExists = fs.existsSync(partDir);
+    let localStorageFiles = 0;
+    if (partExists) {
+      const lsDir = path.join(partDir, 'Local Storage');
+      if (fs.existsSync(lsDir)) {
+        try { localStorageFiles = fs.readdirSync(lsDir, { recursive: true }).length; } catch {}
+      }
+    }
+
+    // Check cookies WITHOUT initializing the session if possible
+    // Unfortunately, we must use session API to read cookies
+    let cookieCount = 0;
+    try {
+      const ses = session.fromPartition(`persist:of-${acct.id}`);
+      const cookies = await ses.cookies.get({});
+      cookieCount = cookies.length;
+    } catch {}
+
+    results.push({
+      id: acct.id,
+      name: acct.name,
+      partitionExists: partExists,
+      localStorageFiles,
+      cookieCount,
+      uploaded: lastUploadHashes.has(acct.id),
+    });
+  }
+  return results;
+}
+
 // ============ EXPORTS ============
 module.exports = {
   initSync,
@@ -439,5 +498,6 @@ module.exports = {
   uploadAllSessions,
   downloadAllSessions,
   factoryReset,
+  getDiagnostics,
   get isInitialized() { return initialized; },
 };

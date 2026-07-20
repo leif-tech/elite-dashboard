@@ -278,19 +278,10 @@ ipcMain.handle('set-api-key', async (_, key) => {
   }
   return true;
 });
-// Helper: only return accounts with active cookies
-async function getActiveAccounts() {
-  const accounts = store.get('accounts') || [];
-  const active = [];
-  for (const acct of accounts) {
-    const ses = session.fromPartition(`persist:of-${acct.id}`);
-    const cookies = await ses.cookies.get({});
-    if (cookies.length > 0) active.push(acct);
-  }
-  return active;
-}
-
-ipcMain.handle('get-accounts', () => getActiveAccounts());
+// Return all accounts from store — do NOT call session.fromPartition() here
+// Calling it eagerly initializes sessions with empty Local Storage,
+// which prevents Force Download from writing Local Storage files
+ipcMain.handle('get-accounts', () => store.get('accounts') || []);
 ipcMain.handle('save-account', (_, account) => {
   const accounts = store.get('accounts');
   const idx = accounts.findIndex((a) => a.id === account.id);
@@ -461,7 +452,8 @@ ipcMain.handle('sync-download', async () => {
   if (!firebaseSync.isInitialized) return { success: false, error: 'Not connected' };
   const result = await firebaseSync.downloadAllSessions();
   if (mainWindow && !mainWindow.isDestroyed()) {
-    getActiveAccounts().then(a => mainWindow.webContents.send('sync-accounts-updated', a));
+    const accounts = store.get('accounts') || [];
+    mainWindow.webContents.send('sync-accounts-updated', accounts);
   }
   return { success: true, ...result };
 });
@@ -479,6 +471,12 @@ ipcMain.handle('sync-factory-reset', async () => {
     mainWindow.webContents.send('sync-accounts-updated', []);
   }
   return result;
+});
+
+// Diagnostics: show sync state for debugging
+ipcMain.handle('sync-diagnostics', async () => {
+  if (!firebaseSync.isInitialized) return [];
+  return firebaseSync.getDiagnostics();
 });
 
 async function initFirebaseSync() {
