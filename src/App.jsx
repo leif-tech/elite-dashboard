@@ -8,10 +8,19 @@ import { setApiKey, getApiKey, listAccounts as apiListAccounts } from './api';
 export default function App() {
   const [accounts, setAccounts] = useState([]);
   const [activeId, _setActiveId] = useState(null);
+  const [loginStatus, setLoginStatus] = useState({});
+  const [dragId, setDragId] = useState(null);
+  const [dragOverId, setDragOverId] = useState(null);
+
+  const refreshLoginStatus = () => {
+    window.electronAPI?.checkAllLoginStatus().then(status => setLoginStatus(status)).catch(() => {});
+  };
 
   const setActiveId = (newId) => {
     if (activeId && activeId.startsWith('acct_') && activeId !== newId) {
       window.electronAPI.syncUploadAccount(activeId);
+      // Refresh login status after uploading (detects new logins)
+      setTimeout(refreshLoginStatus, 1000);
     }
     _setActiveId(newId);
   };
@@ -22,6 +31,22 @@ export default function App() {
   const [apiAccounts, setApiAccounts] = useState([]);
   const [apiKeySet, setApiKeySet] = useState(false);
   const [syncStatus, setSyncStatus] = useState({ connected: false });
+
+  // Only logged-in accounts appear in the sidebar
+  const sidebarAccounts = accounts.filter(a => loginStatus[a.id]);
+
+  const handleReorder = (draggedId, targetId) => {
+    if (draggedId === targetId) return;
+    const newAccounts = [...accounts];
+    const dragIdx = newAccounts.findIndex(a => a.id === draggedId);
+    const targetIdx = newAccounts.findIndex(a => a.id === targetId);
+    if (dragIdx < 0 || targetIdx < 0) return;
+    const [dragged] = newAccounts.splice(dragIdx, 1);
+    const insertIdx = newAccounts.findIndex(a => a.id === targetId);
+    newAccounts.splice(insertIdx, 0, dragged);
+    setAccounts(newAccounts);
+    window.electronAPI.reorderAccounts(newAccounts);
+  };
 
   const loadApiAccounts = async (key) => {
     if (!key) return;
@@ -34,12 +59,14 @@ export default function App() {
 
   const handleSyncNow = async () => {
     try { await window.electronAPI?.syncNow(); } catch {}
+    refreshLoginStatus();
   };
 
   const handleFactoryReset = async () => {
     if (!confirm('This will delete ALL accounts and sync data across all devices. You will need to log in again. Continue?')) return;
     try { await window.electronAPI?.syncFactoryReset(); } catch {}
     setAccounts([]);
+    setLoginStatus({});
     _setActiveId(null);
   };
 
@@ -53,7 +80,12 @@ export default function App() {
       });
       window.electronAPI.syncStatus().then((s) => setSyncStatus(s || { connected: false }));
       window.electronAPI.onSyncUpdate((status) => setSyncStatus(status));
-      window.electronAPI.onSyncAccountsUpdated((accts) => setAccounts(accts || []));
+      window.electronAPI.onSyncAccountsUpdated((accts) => {
+        setAccounts(accts || []);
+        refreshLoginStatus();
+      });
+      // Initial login status check (after sync has completed)
+      setTimeout(refreshLoginStatus, 2000);
     }
   }, []);
 
@@ -161,15 +193,45 @@ export default function App() {
           </svg>
         </button>
 
-        {/* Accounts */}
+        {/* Accounts — only logged-in accounts shown, draggable to reorder */}
         <div className="flex-1 flex flex-col items-center gap-1.5 py-1 overflow-y-auto w-full">
-          {accounts.map((acct) => (
-            <div key={acct.id} className="relative group flex justify-center">
+          {sidebarAccounts.map((acct) => (
+            <div
+              key={acct.id}
+              className="relative group flex justify-center"
+              draggable
+              onDragStart={(e) => {
+                setDragId(acct.id);
+                e.dataTransfer.effectAllowed = 'move';
+                e.currentTarget.style.opacity = '0.4';
+              }}
+              onDragEnd={(e) => {
+                e.currentTarget.style.opacity = '1';
+                setDragId(null);
+                setDragOverId(null);
+              }}
+              onDragOver={(e) => {
+                e.preventDefault();
+                e.dataTransfer.dropEffect = 'move';
+                if (acct.id !== dragId) setDragOverId(acct.id);
+              }}
+              onDragLeave={() => setDragOverId(null)}
+              onDrop={(e) => {
+                e.preventDefault();
+                if (dragId && dragId !== acct.id) handleReorder(dragId, acct.id);
+                setDragId(null);
+                setDragOverId(null);
+              }}
+            >
+              {/* Drop indicator */}
+              {dragOverId === acct.id && dragId !== acct.id && (
+                <div className="absolute -top-[3px] left-2 right-2 h-[3px] bg-accent rounded-full z-10" />
+              )}
               <button
                 onClick={() => setActiveId(acct.id)}
                 onMouseEnter={() => setHoveredAcct(acct)}
                 onMouseLeave={() => { setHoveredAcct(null); setConfirmRemove(null); }}
-                className={`w-[42px] h-[42px] rounded-full flex items-center justify-center text-sm font-bold transition-all shrink-0 ${
+                className={`w-[42px] h-[42px] rounded-full flex items-center justify-center text-sm font-bold transition-all shrink-0 cursor-grab active:cursor-grabbing ${
                   activeId === acct.id
                     ? 'ring-2 ring-accent ring-offset-2 ring-offset-dark-900 bg-dark-500 text-white'
                     : 'bg-dark-700 text-gray-400 hover:brightness-125'

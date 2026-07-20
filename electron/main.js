@@ -297,6 +297,29 @@ ipcMain.handle('set-api-key', async (_, key) => {
 
 ipcMain.handle('get-accounts', () => store.get('accounts') || []);
 
+// Check which accounts have onlyfans.com cookies (= logged in)
+ipcMain.handle('check-all-login-status', async () => {
+  const accounts = store.get('accounts') || [];
+  const status = {};
+  for (const acct of accounts) {
+    try {
+      const ses = session.fromPartition(`persist:of-${acct.id}`);
+      const cookies = await ses.cookies.get({});
+      const ofCookies = cookies.filter(c => c.domain && c.domain.includes('onlyfans.com'));
+      status[acct.id] = ofCookies.length > 0;
+    } catch {
+      status[acct.id] = false;
+    }
+  }
+  return status;
+});
+
+// Save reordered accounts array
+ipcMain.handle('reorder-accounts', (_, accounts) => {
+  store.set('accounts', accounts);
+  return accounts;
+});
+
 ipcMain.handle('save-account', (_, account) => {
   const accounts = store.get('accounts');
   const idx = accounts.findIndex((a) => a.id === account.id);

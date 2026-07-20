@@ -8,6 +8,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getApiKey: () => ipcRenderer.invoke('get-api-key'),
   setApiKey: (key) => ipcRenderer.invoke('set-api-key', key),
   getAccounts: () => ipcRenderer.invoke('get-accounts'),
+  checkAllLoginStatus: () => ipcRenderer.invoke('check-all-login-status'),
+  reorderAccounts: (accounts) => ipcRenderer.invoke('reorder-accounts', accounts),
   saveAccount: (account) => ipcRenderer.invoke('save-account', account),
   removeAccount: (id) => ipcRenderer.invoke('remove-account', id),
   setProxy: (data) => ipcRenderer.invoke('set-proxy', data),
