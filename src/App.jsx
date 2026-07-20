@@ -7,9 +7,8 @@ import { setApiKey, getApiKey, listAccounts as apiListAccounts } from './api';
 
 export default function App() {
   const [accounts, setAccounts] = useState([]);
-  const [activeId, _setActiveId] = useState(null); // null = home, string = account id, __proxy__ / __mass_messages__
+  const [activeId, _setActiveId] = useState(null);
 
-  // Sync previous account's session before switching
   const setActiveId = (newId) => {
     if (activeId && activeId.startsWith('acct_') && activeId !== newId) {
       window.electronAPI.syncUploadAccount(activeId);
@@ -27,10 +26,21 @@ export default function App() {
   const loadApiAccounts = async (key) => {
     if (!key) return;
     setApiKey(key);
-    const accts = await apiListAccounts(); // throws on invalid key
+    const accts = await apiListAccounts();
     if (window.electronAPI) await window.electronAPI.setApiKey(key);
     setApiKeySet(true);
     setApiAccounts(Array.isArray(accts) ? accts : accts?.data || []);
+  };
+
+  const handleSyncNow = async () => {
+    try { await window.electronAPI?.syncNow(); } catch {}
+  };
+
+  const handleFactoryReset = async () => {
+    if (!confirm('This will delete ALL accounts and sync data across all devices. You will need to log in again. Continue?')) return;
+    try { await window.electronAPI?.syncFactoryReset(); } catch {}
+    setAccounts([]);
+    _setActiveId(null);
   };
 
   useEffect(() => {
@@ -41,7 +51,6 @@ export default function App() {
       window.electronAPI.getApiKey().then((key) => {
         if (key) loadApiAccounts(key).catch(() => {});
       });
-      // Sync status
       window.electronAPI.syncStatus().then((s) => setSyncStatus(s || { connected: false }));
       window.electronAPI.onSyncUpdate((status) => setSyncStatus(status));
       window.electronAPI.onSyncAccountsUpdated((accts) => setAccounts(accts || []));
@@ -76,7 +85,6 @@ export default function App() {
     setAccounts(accts || []);
   };
 
-  // Determine main content
   const renderMain = () => {
     if (activeId === '__chats__') {
       return <ChatsView apiAccounts={apiAccounts} />;
@@ -88,7 +96,19 @@ export default function App() {
       return <ProxySettingsView accounts={accounts} />;
     }
     if (activeId === null) {
-      return <HomeView accounts={accounts} onSelect={setActiveId} onAdd={() => setAdding(true)} apiKeySet={apiKeySet} apiAccounts={apiAccounts} onApiKeyConnect={loadApiAccounts} syncStatus={syncStatus} />;
+      return (
+        <HomeView
+          accounts={accounts}
+          onSelect={setActiveId}
+          onAdd={() => setAdding(true)}
+          apiKeySet={apiKeySet}
+          apiAccounts={apiAccounts}
+          onApiKeyConnect={loadApiAccounts}
+          syncStatus={syncStatus}
+          onSyncNow={handleSyncNow}
+          onFactoryReset={handleFactoryReset}
+        />
+      );
     }
     const acct = accounts.find((a) => a.id === activeId);
     return <OFWebview key={activeId} accountId={activeId} proxy={acct?.proxy} onToggleProxy={() => toggleProxy(activeId)} />;
@@ -141,7 +161,7 @@ export default function App() {
           </svg>
         </button>
 
-        {/* Accounts — main section */}
+        {/* Accounts */}
         <div className="flex-1 flex flex-col items-center gap-1.5 py-1 overflow-y-auto w-full">
           {accounts.map((acct) => (
             <div key={acct.id} className="relative group flex justify-center">
@@ -157,11 +177,9 @@ export default function App() {
               >
                 {(acct.name || '?')[0].toUpperCase()}
               </button>
-              {/* Proxy dot */}
               {acct.proxy?.enabled && (
                 <div className="absolute bottom-0 right-1 w-3 h-3 rounded-full bg-green-500 border-2 border-dark-900" />
               )}
-              {/* Remove button */}
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -176,7 +194,6 @@ export default function App() {
             </div>
           ))}
 
-          {/* Add account button — cyan circle */}
           <button
             onClick={() => setAdding(true)}
             className="w-[42px] h-[42px] rounded-full bg-accent hover:bg-accent-hover flex items-center justify-center transition-colors shrink-0 mt-1"
@@ -191,7 +208,7 @@ export default function App() {
         {/* Tool icons at bottom */}
         <div className="flex flex-col items-center gap-1 py-2 border-t border-dark-700 w-full">
           {/* Sync status indicator */}
-          <div className="relative w-9 h-9 flex items-center justify-center" title={syncStatus.connected ? `Synced${syncStatus.lastSync ? ' · ' + new Date(syncStatus.lastSync).toLocaleTimeString() : ''}` : 'Sync disconnected'}>
+          <div className="relative w-9 h-9 flex items-center justify-center" title={syncStatus.connected ? `Auto-syncing${syncStatus.lastSync ? ' · ' + new Date(syncStatus.lastSync).toLocaleTimeString() : ''}` : 'Sync disconnected'}>
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" className={syncStatus.connected ? 'text-gray-400' : 'text-gray-700'}>
               <path d="M18 10h-1.26A8 8 0 1 0 9 20h9a5 5 0 0 0 0-10z"/>
             </svg>
@@ -274,7 +291,7 @@ export default function App() {
 }
 
 // Home / landing page
-function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyConnect, syncStatus }) {
+function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyConnect, syncStatus, onSyncNow, onFactoryReset }) {
   const [keyInput, setKeyInput] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState('');
@@ -388,7 +405,7 @@ function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyC
               <h3 className="font-semibold text-sm">Session Sync</h3>
               <p className="text-xs text-gray-500">
                 {syncStatus.connected
-                  ? `Connected${syncStatus.lastSync ? ' · Last sync: ' + new Date(syncStatus.lastSync).toLocaleTimeString() : ''}`
+                  ? `Auto-syncing every 30s${syncStatus.lastSync ? ' · Last: ' + new Date(syncStatus.lastSync).toLocaleTimeString() : ''}${syncStatus.accounts ? ' · ' + syncStatus.accounts + ' accounts' : ''}`
                   : syncStatus.error || 'Disconnected'}
               </p>
             </div>
@@ -398,38 +415,24 @@ function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyC
             <button
               onClick={async () => {
                 setSyncing(true);
-                try { await window.electronAPI?.syncForce(); } catch {}
+                try { await onSyncNow(); } catch {}
                 setSyncing(false);
               }}
               disabled={syncing}
               className="btn-ghost text-xs py-1.5 px-3 disabled:opacity-50"
             >
-              {syncing ? 'Uploading...' : 'Force Upload'}
+              {syncing ? 'Syncing...' : 'Sync Now'}
             </button>
             <button
               onClick={async () => {
                 setSyncing(true);
-                try { await window.electronAPI?.syncDownload(); } catch {}
-                setSyncing(false);
-              }}
-              disabled={syncing}
-              className="btn-ghost text-xs py-1.5 px-3 disabled:opacity-50"
-            >
-              {syncing ? 'Downloading...' : 'Force Download'}
-            </button>
-            <button
-              onClick={async () => {
-                if (!confirm('This will delete ALL accounts and sync data. You will need to log in again. Continue?')) return;
-                setSyncing(true);
-                try { await window.electronAPI?.syncFactoryReset(); } catch {}
-                setAccounts([]);
-                _setActiveId(null);
+                try { await onFactoryReset(); } catch {}
                 setSyncing(false);
               }}
               disabled={syncing}
               className="btn-ghost text-xs py-1.5 px-3 text-red-500 disabled:opacity-50"
             >
-              {syncing ? 'Resetting...' : 'Factory Reset'}
+              Factory Reset
             </button>
           </div>
         </div>
@@ -475,7 +478,6 @@ function OFWebview({ accountId, proxy, onToggleProxy }) {
   const [activeTab, setActiveTab] = useState(1);
   const nextId = useRef(2);
 
-  // Listen for "Open in New Tab" from main process context menu
   useEffect(() => {
     if (!window.electronAPI?.onOpenNewTab) return;
     const handler = (url) => {
@@ -486,7 +488,6 @@ function OFWebview({ accountId, proxy, onToggleProxy }) {
     window.electronAPI.onOpenNewTab(handler);
   }, []);
 
-  // Reset tabs when switching accounts
   useEffect(() => {
     setTabs([{ id: 1, title: 'OnlyFans', url: 'https://onlyfans.com' }]);
     setActiveTab(1);
@@ -516,7 +517,6 @@ function OFWebview({ accountId, proxy, onToggleProxy }) {
 
   return (
     <div className="flex flex-col h-full">
-      {/* Tab bar — only show when more than 1 tab */}
       {tabs.length > 1 && (
         <div className="flex items-center bg-dark-900 border-b border-dark-600 px-1 shrink-0">
           {tabs.map((tab) => (
@@ -548,7 +548,6 @@ function OFWebview({ accountId, proxy, onToggleProxy }) {
         </div>
       )}
 
-      {/* Render all tabs, only show active */}
       {tabs.map((tab) => (
         <TabWebview
           key={`${accountId}-${tab.id}`}
@@ -588,7 +587,6 @@ function TabWebview({ accountId, tabId, initialUrl, isActive, proxy, onTogglePro
     const onStopLoad = () => {
       setLoading(false);
       onNavigation();
-      // Update tab title from page title
       try {
         const title = wv.getTitle();
         if (title) onTitleChange(title.length > 25 ? title.slice(0, 25) + '...' : title);
@@ -615,7 +613,6 @@ function TabWebview({ accountId, tabId, initialUrl, isActive, proxy, onTogglePro
 
   return (
     <div className={`flex flex-col ${isActive ? 'flex-1' : 'hidden'}`}>
-      {/* Browser toolbar */}
       <div className="flex items-center gap-2 px-3 py-2 bg-dark-800 border-b border-dark-600">
         <button onClick={goBack} disabled={!canGoBack} className="p-1.5 rounded hover:bg-dark-600 disabled:opacity-30 transition-colors">
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>

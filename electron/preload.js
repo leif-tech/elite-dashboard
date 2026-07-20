@@ -19,8 +19,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openExternal: (url) => ipcRenderer.invoke('open-external', url),
   // Session Sync
   syncStatus: () => ipcRenderer.invoke('sync-status'),
-  syncForce: () => ipcRenderer.invoke('sync-force'),
-  syncDownload: () => ipcRenderer.invoke('sync-download'),
+  syncNow: () => ipcRenderer.invoke('sync-now'),
   syncUploadAccount: (id) => ipcRenderer.invoke('sync-upload-account', id),
   syncFactoryReset: () => ipcRenderer.invoke('sync-factory-reset'),
   onSyncUpdate: (callback) => {
