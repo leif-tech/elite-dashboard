@@ -326,17 +326,17 @@ ipcMain.handle('check-all-login-status', async () => {
       const ofCookies = await ses.cookies.get({ domain: 'onlyfans.com' });
       const hasSess = ofCookies.some(c => c.name === 'sess' && c.value && c.value.length > 10);
       if (!hasSess) { status[acct.id] = false; return; }
-      // Real validation — fetch OF homepage and check if we get the logged-in page
+      // Real validation — fetch authenticated page, check if redirected to login
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
-      const response = await ses.fetch('https://onlyfans.com/', {
-        method: 'HEAD',
+      const response = await ses.fetch('https://onlyfans.com/my/settings', {
+        method: 'GET',
         redirect: 'manual',
         signal: controller.signal,
         headers: { 'User-Agent': CHROME_UA },
       });
       clearTimeout(timeout);
-      // 200 = logged in (home feed), 3xx = redirect to login page
+      // 200 = logged in, 3xx = redirect to login/home (session expired)
       status[acct.id] = response.status === 200;
     } catch {
       status[acct.id] = false;

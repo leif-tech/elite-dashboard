@@ -311,12 +311,10 @@ function emitStatus(status) {
 }
 
 // ============ FULL SYNC (manual) ============
-// Clears the deletion block list and forces a full sync.
-// Used when user clicks "Sync Now" — intentional action to pull everything.
+// Forces a fresh sync but RESPECTS deletions — deleted accounts stay deleted.
+// Only Factory Reset clears the deletion block list.
 async function fullSync() {
-  console.log(`[Sync] Full sync — clearing ${deletedAccountIds.size} deleted IDs`);
-  deletedAccountIds.clear();
-  if (store) store.set('deletedIds', []);
+  console.log(`[Sync] Full sync — forcing re-check of all remote sessions (${deletedAccountIds.size} deletions preserved)`);
   lastKnownRemoteTime.clear();
   await smartSync();
 }
