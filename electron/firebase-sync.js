@@ -19,6 +19,20 @@ let cachedKeySource = null;
 let syncInProgress = false;
 let deletedAccountIds = new Set();
 
+// Mark an account as deleted IMMEDIATELY — must be called before any async work
+// so smartSync can't slip in between store removal and deletion tracking
+function markAsDeleted(accountId) {
+  deletedAccountIds.add(accountId);
+  // Persist to store so deleted IDs survive app restart
+  if (store) {
+    const persisted = store.get('deletedIds') || [];
+    if (!persisted.includes(accountId)) {
+      store.set('deletedIds', [...persisted, accountId]);
+    }
+  }
+  console.log(`[Sync] Marked ${accountId} as deleted. deletedIds:`, [...deletedAccountIds]);
+}
+
 const FIREBASE_CONFIG = {
   apiKey: 'AIzaSyCtweAn8fMiNy0940RclIL1t-LZfcbxMwk',
   authDomain: 'elite-228d6.firebaseapp.com',
@@ -248,6 +262,13 @@ async function initSync(electronStore, statusCb, accountsCb) {
     initialized = true;
     emitStatus({ connected: true, lastSync: null });
 
+    // Restore persisted deleted IDs (survive app restart)
+    const persistedDeleted = store.get('deletedIds') || [];
+    for (const id of persistedDeleted) deletedAccountIds.add(id);
+    if (persistedDeleted.length > 0) {
+      console.log(`[Sync] Restored ${persistedDeleted.length} deleted IDs from store:`, persistedDeleted);
+    }
+
     // Deduplicate accounts on startup (fixes corrupted store from prior bugs)
     const accts = store.get('accounts') || [];
     const seen = new Set();
@@ -333,12 +354,13 @@ async function smartSync() {
 
       // Skip accounts that were explicitly deleted on this machine
       if (deletedAccountIds.has(remote.id)) {
+        console.log(`[Sync] Skipping deleted account: ${remote.id} (${remote.name})`);
         continue;
       }
 
       if (!localIds.has(remote.id)) {
         // New account from another device
-        console.log(`[Sync] New remote account: ${remote.name}`);
+        console.log(`[Sync] New remote account: ${remote.id} (${remote.name}). localIds:`, [...localIds], 'deletedIds:', [...deletedAccountIds]);
         const ok = await downloadSession(remote.id, apiKey, teamId);
         if (ok) {
           updatedLocalAccounts.push({ id: remote.id, name: remote.name });
@@ -384,6 +406,7 @@ async function smartSync() {
 
 // ============ DOWNLOAD SINGLE SESSION ============
 async function downloadSession(accountId, apiKey, teamId) {
+  if (deletedAccountIds.has(accountId)) return false;
   try {
     const { doc, getDoc } = require('firebase/firestore');
     const docSnap = await getDoc(doc(db, `teams/${teamId}/sessions`, accountId));
@@ -440,6 +463,7 @@ async function downloadSession(accountId, apiKey, teamId) {
 // ============ UPLOAD ============
 async function uploadSession(accountId, force = false) {
   if (!initialized || !db || !store) return;
+  if (deletedAccountIds.has(accountId)) return;
 
   const apiKey = store.get('apiKey');
   if (!apiKey) return;
@@ -566,7 +590,10 @@ async function factoryReset() {
     }
   }
 
-  if (store) store.set('accounts', []);
+  if (store) {
+    store.set('accounts', []);
+    store.set('deletedIds', []);
+  }
   lastUploadHashes.clear();
   lastKnownRemoteTime.clear();
   initializedSessions.clear();
@@ -599,6 +626,7 @@ module.exports = {
   smartSync,
   uploadSession,
   uploadAllSessions,
+  markAsDeleted,
   deleteRemoteSession,
   factoryReset,
   get isInitialized() { return initialized; },

@@ -357,20 +357,15 @@ ipcMain.handle('save-account', (_, account) => {
 });
 
 ipcMain.handle('remove-account', async (_, id) => {
+  // Mark as deleted IMMEDIATELY — before any async work — so smartSync can't re-add
+  firebaseSync.markAsDeleted(id);
   const allAccounts = store.get('accounts');
   const removed = allAccounts.find((a) => a.id === id);
   const accounts = allAccounts.filter((a) => a.id !== id);
   store.set('accounts', accounts);
   if (removed?.proxy) unregisterProxyAuth(removed.proxy);
-  await session.fromPartition(`persist:of-${id}`).clearStorageData();
-  // Clean up partition files from disk
-  const fs = require('fs');
-  const partDir = path.join(app.getPath('userData'), 'Partitions', `of-${id}`);
-  if (fs.existsSync(partDir)) {
-    fs.rmSync(partDir, { recursive: true, force: true });
-  }
-  // Delete from Firestore so removed account doesn't reappear via sync
-  // MUST await — if fire-and-forget, smartSync can re-add the account before delete completes
+
+  // Delete from Firestore FIRST — this is critical, must happen before anything that can fail
   if (firebaseSync.isInitialized) {
     try {
       await firebaseSync.deleteRemoteSession(id);
@@ -378,6 +373,25 @@ ipcMain.handle('remove-account', async (_, id) => {
       console.warn('[Sync] Failed to delete remote session:', err.message);
     }
   }
+
+  // Clear session data — may partially fail on Windows due to file locks, that's OK
+  try {
+    await session.fromPartition(`persist:of-${id}`).clearStorageData();
+  } catch (err) {
+    console.warn('[Main] clearStorageData failed (non-fatal):', err.message);
+  }
+
+  // Try to clean up partition files — EBUSY is expected on Windows (session holds file locks)
+  try {
+    const fs = require('fs');
+    const partDir = path.join(app.getPath('userData'), 'Partitions', `of-${id}`);
+    if (fs.existsSync(partDir)) {
+      fs.rmSync(partDir, { recursive: true, force: true });
+    }
+  } catch (err) {
+    console.warn('[Main] Partition cleanup failed (non-fatal):', err.message);
+  }
+
   return accounts;
 });
 
