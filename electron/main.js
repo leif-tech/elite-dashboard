@@ -326,6 +326,8 @@ ipcMain.handle('check-all-login-status', async () => {
       const ofCookies = await ses.cookies.get({ domain: 'onlyfans.com' });
       const hasSess = ofCookies.some(c => c.name === 'sess' && c.value && c.value.length > 10);
       if (!hasSess) { status[acct.id] = false; return; }
+      // If proxy is enabled, trust cookie check (ses.fetch can't auth with proxy)
+      if (acct.proxy?.enabled) { status[acct.id] = true; return; }
       // Real validation — fetch authenticated page, check if redirected to login
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 8000);
