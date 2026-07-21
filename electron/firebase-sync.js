@@ -368,11 +368,13 @@ async function smartSync() {
       }
 
       if (!localIds.has(remote.id)) {
-        // New account from another device
+        // New account from another device — include proxy settings
         console.log(`[Sync] New remote account: ${remote.id} (${remote.name}). localIds:`, [...localIds], 'deletedIds:', [...deletedAccountIds]);
         const ok = await downloadSession(remote.id, apiKey, teamId);
         if (ok) {
-          updatedLocalAccounts.push({ id: remote.id, name: remote.name });
+          const newAcct = { id: remote.id, name: remote.name };
+          if (remote.proxy) newAcct.proxy = remote.proxy;
+          updatedLocalAccounts.push(newAcct);
           localIds.add(remote.id);
           lastKnownRemoteTime.set(remote.id, remoteUpdatedAt);
           accountListChanged = true;
@@ -380,6 +382,15 @@ async function smartSync() {
       } else if (remoteUpdatedAt > lastKnown) {
         // Session updated by another device since our last check
         await downloadSession(remote.id, apiKey, teamId);
+        // Sync proxy settings from remote
+        if (remote.proxy) {
+          const accts = store.get('accounts') || [];
+          const idx = accts.findIndex(a => a.id === remote.id);
+          if (idx >= 0) {
+            accts[idx].proxy = remote.proxy;
+            store.set('accounts', accts);
+          }
+        }
         lastKnownRemoteTime.set(remote.id, remoteUpdatedAt);
       }
     }
@@ -536,6 +547,7 @@ async function uploadSession(accountId, force = false) {
       await setDoc(doc(db, `teams/${teamId}/accounts`, accountId), {
         id: acct.id,
         name: acct.name,
+        proxy: acct.proxy || null,
         updatedAt: now,
         updatedBy: machineId,
       });

@@ -433,34 +433,36 @@ ipcMain.handle('set-proxy', async (_, data) => {
 
 ipcMain.handle('test-proxy', async (_, { proxy }) => {
   const start = Date.now();
-  const partition = `proxy-test-${Date.now()}`;
+  const http = require('http');
   try {
-    // Use Electron session proxy (supports both HTTP and SOCKS5)
-    const testSession = session.fromPartition(partition);
-    await testSession.setProxy({ proxyRules: buildProxyRules(proxy) });
-    if (proxy.username) registerProxyAuth(proxy);
-
     const result = await new Promise((resolve, reject) => {
-      const timeout = setTimeout(() => reject(new Error('Connection timed out (15s)')), 15000);
-      const request = net.request({ url: 'http://ip-api.com/json', partition });
-      let body = '';
-      request.on('response', (response) => {
-        response.on('data', (chunk) => { body += chunk.toString(); });
-        response.on('end', () => {
-          clearTimeout(timeout);
+      const timer = setTimeout(() => reject(new Error('Connection timed out (15s)')), 15000);
+      const options = {
+        host: proxy.host,
+        port: parseInt(proxy.port),
+        path: 'http://ip-api.com/json',
+        method: 'GET',
+        headers: { Host: 'ip-api.com', 'User-Agent': CHROME_UA },
+      };
+      if (proxy.username) {
+        options.headers['Proxy-Authorization'] = 'Basic ' + Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64');
+      }
+      const req = http.request(options, (res) => {
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          clearTimeout(timer);
+          if (res.statusCode === 407) { reject(new Error('Proxy rejected credentials (407)')); return; }
           try { resolve(JSON.parse(body)); }
-          catch { reject(new Error('Invalid response from proxy')); }
+          catch { reject(new Error(`Unexpected response (HTTP ${res.statusCode})`)); }
         });
       });
-      request.on('error', (err) => { clearTimeout(timeout); reject(err); });
-      request.end();
+      req.on('error', (err) => { clearTimeout(timer); reject(err); });
+      req.end();
     });
-
-    if (proxy.username) unregisterProxyAuth(proxy);
     const latency = Date.now() - start;
     return { success: true, ip: result.query || result.ip, country: result.countryCode || result.country, city: result.city, latency };
   } catch (err) {
-    if (proxy.username) unregisterProxyAuth(proxy);
     return { success: false, error: err.message };
   }
 });
@@ -497,6 +499,7 @@ ipcMain.handle('sync-now', async () => {
     if (!firebaseSync.isInitialized) return { success: false, error: 'Failed to connect' };
   }
   await firebaseSync.fullSync();
+  applyAllProxies();
   const accounts = store.get('accounts') || [];
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sync-accounts-updated', accounts);
@@ -538,6 +541,7 @@ async function initFirebaseSync() {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('sync-accounts-updated', accounts);
         }
+        applyAllProxies();
       }
     );
   } catch (err) {
