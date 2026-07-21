@@ -124,7 +124,7 @@ export default function ChatsView({ apiAccounts }) {
               <>
                 {filtered.map((chat) => {
                   const user = chat.withUser || chat.user || {};
-                  const avatar = user.avatar || user.avatarThumbs?.c50;
+                  const avatar = (user.avatar || user.avatarThumbs?.c50 || '').trim() || null;
                   const name = user.name || user.username || 'Unknown';
                   const username = user.username;
                   const lastMsg = chat.lastMessage || chat.text || '';
@@ -212,7 +212,9 @@ export default function ChatsView({ apiAccounts }) {
 
       {!selectedAcct && (
         <div className="flex-1 flex items-center justify-center">
-          <p className="text-sm text-gray-600">Select an account to view messages.</p>
+          <p className="text-sm text-gray-600">
+            {apiAccounts.length === 0 ? 'Connect your API key on the Home page to use Messages.' : 'Select an account to view messages.'}
+          </p>
         </div>
       )}
     </div>

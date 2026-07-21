@@ -83,7 +83,7 @@ export default function MassMessagesView({ apiAccounts }) {
       setScheduleEnabled(false);
       setScheduleDate('');
       // Refresh queue
-      loadQueue(null);
+      loadQueue(abortRef.current?.signal);
     } catch (err) {
       alert('Send failed: ' + err.message);
     }
@@ -118,16 +118,20 @@ export default function MassMessagesView({ apiAccounts }) {
       {/* Account selector */}
       <div className="mb-6">
         <label className="block text-sm text-gray-400 mb-1.5">Account</label>
-        <select
-          value={selectedAcct}
-          onChange={(e) => setSelectedAcct(e.target.value)}
-          className="input w-full max-w-sm py-2"
-        >
-          <option value="">Select an API account...</option>
-          {apiAccounts.map((a) => (
-            <option key={a.id} value={a.id}>{a.display_name || a.onlyfans_username || a.id}</option>
-          ))}
-        </select>
+        {apiAccounts.length === 0 ? (
+          <p className="text-sm text-gray-500">Connect your API key on the Home page to use Mass Messages.</p>
+        ) : (
+          <select
+            value={selectedAcct}
+            onChange={(e) => setSelectedAcct(e.target.value)}
+            className="input w-full max-w-sm py-2"
+          >
+            <option value="">Select an API account...</option>
+            {apiAccounts.map((a) => (
+              <option key={a.id} value={a.id}>{a.display_name || a.onlyfans_username || a.id}</option>
+            ))}
+          </select>
+        )}
       </div>
 
       {selectedAcct && (

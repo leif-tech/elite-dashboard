@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import './index.css';
 import ProxySettingsView from './pages/ProxySettingsView';
 import MassMessagesView from './pages/MassMessagesView';
@@ -14,6 +14,7 @@ export default function App() {
   const [isLoading, setIsLoading] = useState(true);
   const [dragId, setDragId] = useState(null);
   const [dragOverId, setDragOverId] = useState(null);
+  const loginRefreshTimer = useRef(null);
 
   const refreshLoginStatus = () => {
     window.electronAPI?.checkAllLoginStatus().then(status => setLoginStatus(status)).catch(err => console.warn('Login status check failed:', err));
@@ -23,7 +24,8 @@ export default function App() {
     if (activeId && activeId.startsWith('acct_') && activeId !== newId) {
       window.electronAPI.syncUploadAccount(activeId);
       // Refresh login status after uploading (detects new logins)
-      setTimeout(refreshLoginStatus, 1000);
+      clearTimeout(loginRefreshTimer.current);
+      loginRefreshTimer.current = setTimeout(refreshLoginStatus, 1000);
     }
     _setActiveId(newId);
   };

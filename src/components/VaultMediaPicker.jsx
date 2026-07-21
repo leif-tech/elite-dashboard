@@ -126,7 +126,7 @@ export default function VaultMediaPicker({ accountId, onConfirm, onClose }) {
           {/* Load more */}
           {hasMore && !loading && media.length > 0 && (
             <div className="text-center mt-4">
-              <button onClick={() => fetchMedia(false, null)} className="btn-ghost text-xs border border-dark-500 px-4 py-1.5">
+              <button onClick={() => fetchMedia(false, abortRef.current?.signal)} className="btn-ghost text-xs border border-dark-500 px-4 py-1.5">
                 Load More
               </button>
             </div>

@@ -365,6 +365,16 @@ async function downloadSession(accountId, apiKey, teamId) {
     const json = zlib.gunzipSync(compressed).toString('utf8');
     const payload = JSON.parse(json);
 
+    // Validate payload shape
+    if (!payload || typeof payload !== 'object' || Array.isArray(payload)) {
+      console.error(`[Sync] Invalid payload shape for ${accountId}`);
+      return false;
+    }
+    if (payload.cookies && !Array.isArray(payload.cookies)) {
+      console.error(`[Sync] Invalid cookies format for ${accountId}`);
+      return false;
+    }
+
     if (initializedSessions.has(accountId)) {
       // Session already in memory — only refresh cookies
       // (partition file writes are ignored by the in-memory session)
@@ -406,7 +416,6 @@ async function uploadSession(accountId, force = false) {
     const ses = session.fromPartition(`persist:of-${accountId}`);
     initializedSessions.add(accountId);
     await ses.cookies.flushStore();
-    await new Promise(r => setTimeout(r, 500));
 
     const cookies = await exportCookies(accountId);
     const packed = packPartition(accountId);
@@ -424,21 +433,36 @@ async function uploadSession(accountId, force = false) {
     const b64 = encrypted.toString('base64');
 
     if (b64.length > 900000) {
-      console.error(`[Sync] Data too large for ${accountId}: ${Math.round(b64.length / 1024)}KB`);
+      const sizeKB = Math.round(b64.length / 1024);
+      console.error(`[Sync] Data too large for ${accountId}: ${sizeKB}KB`);
+      emitStatus({ connected: true, warning: `Session data too large to sync (${sizeKB}KB). Clear browser data in that account to reduce size.` });
       return;
     }
 
     const teamId = getTeamId(apiKey);
     const machineId = getMachineId();
     const now = Date.now();
-    const { doc, setDoc } = require('firebase/firestore');
+    const { doc, runTransaction, setDoc } = require('firebase/firestore');
 
-    await setDoc(doc(db, `teams/${teamId}/sessions`, accountId), {
-      data: b64,
-      dataHash: hash,
-      version: 2,
-      updatedAt: now,
-      updatedBy: machineId,
+    // Use transaction to prevent overwriting newer data from another machine
+    const sessionRef = doc(db, `teams/${teamId}/sessions`, accountId);
+    const lastKnown = lastKnownRemoteTime.get(accountId) || 0;
+    await runTransaction(db, async (transaction) => {
+      const snap = await transaction.get(sessionRef);
+      if (snap.exists()) {
+        const remote = snap.data();
+        if (remote.updatedAt > lastKnown && remote.updatedBy !== machineId) {
+          // Another machine uploaded newer data — skip our upload
+          throw new Error('SKIP_STALE');
+        }
+      }
+      transaction.set(sessionRef, {
+        data: b64,
+        dataHash: hash,
+        version: 2,
+        updatedAt: now,
+        updatedBy: machineId,
+      });
     });
 
     const accounts = store.get('accounts') || [];
@@ -457,7 +481,11 @@ async function uploadSession(accountId, force = false) {
     emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: accounts.length });
     console.log(`[Sync] Uploaded ${accountId}: ${cookies.length} cookies, ${Math.round(b64.length / 1024)}KB`);
   } catch (err) {
-    console.error(`[Sync] Upload failed for ${accountId}:`, err.message);
+    if (err.message === 'SKIP_STALE') {
+      console.log(`[Sync] Skipped upload for ${accountId}: remote has newer data`);
+    } else {
+      console.error(`[Sync] Upload failed for ${accountId}:`, err.message);
+    }
   }
 }
 

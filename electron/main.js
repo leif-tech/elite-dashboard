@@ -1,4 +1,4 @@
-const { app, BrowserWindow, ipcMain, session, Menu, clipboard, shell } = require('electron');
+const { app, BrowserWindow, ipcMain, session, net, Menu, clipboard, shell } = require('electron');
 const path = require('path');
 const Store = require('electron-store').default;
 const firebaseSync = require('./firebase-sync');
@@ -165,6 +165,12 @@ function createWindow() {
       callback(WV_ALLOWED.includes(permission));
     });
 
+    // Close orphaned OAuth popups when webview is destroyed (e.g., account switch)
+    wvContents.on('destroyed', () => {
+      const popup = activePopups.get(partition);
+      if (popup && !popup.isDestroyed()) popup.close();
+    });
+
     wvContents.on('will-navigate', (e, url) => {
       if (isOAuthUrl(url)) {
         e.preventDefault();
@@ -293,8 +299,13 @@ ipcMain.handle('open-external', (_, url) => {
 // ============ ACCOUNT & API KEY IPC ============
 ipcMain.handle('get-api-key', () => store.get('apiKey'));
 ipcMain.handle('set-api-key', async (_, key) => {
+  const oldKey = store.get('apiKey');
+  // If key is changing and sync was active, stop old sync first
+  if (oldKey && oldKey !== key && firebaseSync.isInitialized) {
+    firebaseSync.stopSync();
+  }
   store.set('apiKey', key);
-  if (!firebaseSync.isInitialized && key) {
+  if (key) {
     await initFirebaseSync();
     applyAllProxies();
   }
@@ -303,7 +314,7 @@ ipcMain.handle('set-api-key', async (_, key) => {
 
 ipcMain.handle('get-accounts', () => store.get('accounts') || []);
 
-// Check which accounts have onlyfans.com cookies (= logged in)
+// Check which accounts have an auth session cookie on onlyfans.com
 ipcMain.handle('check-all-login-status', async () => {
   const accounts = store.get('accounts') || [];
   const status = {};
@@ -311,7 +322,8 @@ ipcMain.handle('check-all-login-status', async () => {
     try {
       const ses = session.fromPartition(`persist:of-${acct.id}`);
       const ofCookies = await ses.cookies.get({ domain: 'onlyfans.com' });
-      status[acct.id] = ofCookies.length > 0;
+      // Check for actual auth cookie, not just any tracking/consent cookie
+      status[acct.id] = ofCookies.some(c => c.name === 'sess' || c.name === 'auth_id' || c.name === 'auth_uid_369');
     } catch {
       status[acct.id] = false;
     }
@@ -366,6 +378,7 @@ ipcMain.handle('remove-account', async (_, id) => {
 ipcMain.handle('set-proxy', async (_, data) => {
   if (!data || typeof data.accountId !== 'string') return false;
   const { accountId, proxy } = data;
+  if (proxy && (typeof proxy.host !== 'string' || typeof proxy.port !== 'string')) return false;
   const accounts = store.get('accounts');
   const idx = accounts.findIndex((a) => a.id === accountId);
   const oldProxy = idx >= 0 ? accounts[idx].proxy : null;
@@ -386,36 +399,34 @@ ipcMain.handle('set-proxy', async (_, data) => {
 
 ipcMain.handle('test-proxy', async (_, { proxy }) => {
   const start = Date.now();
+  const partition = `proxy-test-${Date.now()}`;
   try {
-    const http = require('http');
+    // Use Electron session proxy (supports both HTTP and SOCKS5)
+    const testSession = session.fromPartition(partition);
+    await testSession.setProxy({ proxyRules: buildProxyRules(proxy) });
+    if (proxy.username) registerProxyAuth(proxy);
+
     const result = await new Promise((resolve, reject) => {
       const timeout = setTimeout(() => reject(new Error('Connection timed out (15s)')), 15000);
-      const proxyOpts = {
-        host: proxy.host,
-        port: parseInt(proxy.port),
-        path: 'http://ip-api.com/json',
-        method: 'GET',
-        headers: { Host: 'ip-api.com' },
-      };
-      if (proxy.username) {
-        const auth = Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64');
-        proxyOpts.headers['Proxy-Authorization'] = `Basic ${auth}`;
-      }
-      const req = http.request(proxyOpts, (res) => {
-        let body = '';
-        res.on('data', (chunk) => { body += chunk.toString(); });
-        res.on('end', () => {
+      const request = net.request({ url: 'http://ip-api.com/json', partition });
+      let body = '';
+      request.on('response', (response) => {
+        response.on('data', (chunk) => { body += chunk.toString(); });
+        response.on('end', () => {
           clearTimeout(timeout);
           try { resolve(JSON.parse(body)); }
           catch { reject(new Error('Invalid response from proxy')); }
         });
       });
-      req.on('error', (err) => { clearTimeout(timeout); reject(err); });
-      req.end();
+      request.on('error', (err) => { clearTimeout(timeout); reject(err); });
+      request.end();
     });
+
+    if (proxy.username) unregisterProxyAuth(proxy);
     const latency = Date.now() - start;
     return { success: true, ip: result.query || result.ip, country: result.countryCode || result.country, city: result.city, latency };
   } catch (err) {
+    if (proxy.username) unregisterProxyAuth(proxy);
     return { success: false, error: err.message };
   }
 });
