@@ -155,6 +155,7 @@ export default function App() {
       return (
         <HomeView
           accounts={accounts}
+          loginStatus={loginStatus}
           onSelect={setActiveId}
           onAdd={() => setAdding(true)}
           apiKeySet={apiKeySet}

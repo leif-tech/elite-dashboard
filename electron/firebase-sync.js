@@ -248,6 +248,20 @@ async function initSync(electronStore, statusCb, accountsCb) {
     initialized = true;
     emitStatus({ connected: true, lastSync: null });
 
+    // Deduplicate accounts on startup (fixes corrupted store from prior bugs)
+    const accts = store.get('accounts') || [];
+    const seen = new Set();
+    const deduped = accts.filter(a => {
+      if (seen.has(a.id)) return false;
+      seen.add(a.id);
+      return true;
+    });
+    if (deduped.length < accts.length) {
+      console.log(`[Sync] Removed ${accts.length - deduped.length} duplicate accounts`);
+      store.set('accounts', deduped);
+      if (accountsUpdatedCallback) accountsUpdatedCallback(deduped);
+    }
+
     // Initial sync — automatically downloads new accounts from other devices
     console.log('[Sync] Running initial sync...');
     await smartSync();
@@ -340,14 +354,26 @@ async function smartSync() {
     }
 
     if (accountListChanged) {
-      store.set('accounts', updatedLocalAccounts);
-      if (accountsUpdatedCallback) accountsUpdatedCallback(updatedLocalAccounts);
+      // Re-read store to avoid overwriting concurrent changes (e.g., account deletion)
+      const currentAccounts = store.get('accounts') || [];
+      const currentIds = new Set(currentAccounts.map(a => a.id));
+      // Only ADD truly new accounts — never overwrite or duplicate
+      const newAccounts = updatedLocalAccounts.filter(a =>
+        !currentIds.has(a.id) && !deletedAccountIds.has(a.id)
+      );
+      if (newAccounts.length > 0) {
+        const merged = [...currentAccounts, ...newAccounts];
+        store.set('accounts', merged);
+        if (accountsUpdatedCallback) accountsUpdatedCallback(merged);
+      }
     }
 
+    // Report count from current store (not stale snapshot)
+    const finalAccounts = store.get('accounts') || [];
     emitStatus({
       connected: true,
       lastSync: new Date().toISOString(),
-      accounts: updatedLocalAccounts.length,
+      accounts: finalAccounts.length,
     });
   } catch (err) {
     console.error('[Sync] Smart sync error:', err.message);

@@ -1,6 +1,6 @@
 import { useState } from 'react';
 
-export default function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyConnect, syncStatus, onSyncNow, onFactoryReset }) {
+export default function HomeView({ accounts, loginStatus, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyConnect, syncStatus, onSyncNow, onFactoryReset }) {
   const [keyInput, setKeyInput] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState('');
@@ -147,18 +147,22 @@ export default function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAcco
         </div>
       )}
 
-      {/* Browser Accounts */}
-      <h3 className="text-sm font-semibold text-gray-300 mb-3">Browser Accounts</h3>
-      {accounts.length === 0 ? (
-        <div className="card text-center py-12 max-w-md mx-auto">
-          <div className="text-4xl mb-4 text-gray-600">+</div>
-          <p className="text-gray-400 mb-2">No browser accounts yet.</p>
-          <p className="text-sm text-gray-600 mb-4">Add an account to browse OnlyFans directly.</p>
-          <button onClick={onAdd} className="btn-primary">Add Account</button>
-        </div>
-      ) : (
-        <div className="grid grid-cols-2 xl:grid-cols-3 gap-4">
-          {accounts.map((acct) => (
+      {/* Browser Accounts — only show logged-in accounts */}
+      {(() => {
+        const loggedInAccounts = accounts.filter(a => loginStatus?.[a.id]);
+        return (
+          <>
+            <h3 className="text-sm font-semibold text-gray-300 mb-3">Browser Accounts</h3>
+            {loggedInAccounts.length === 0 ? (
+              <div className="card text-center py-12 max-w-md mx-auto">
+                <div className="text-4xl mb-4 text-gray-600">+</div>
+                <p className="text-gray-400 mb-2">No logged-in browser accounts.</p>
+                <p className="text-sm text-gray-600 mb-4">Add an account and log in to OnlyFans to see it here.</p>
+                <button onClick={onAdd} className="btn-primary">Add Account</button>
+              </div>
+            ) : (
+              <div className="grid grid-cols-2 xl:grid-cols-3 gap-4">
+                {loggedInAccounts.map((acct) => (
             <button
               key={acct.id}
               onClick={() => onSelect(acct.id)}
@@ -174,9 +178,12 @@ export default function HomeView({ accounts, onSelect, onAdd, apiKeySet, apiAcco
                 </div>
               </div>
             </button>
-          ))}
-        </div>
-      )}
+              ))}
+              </div>
+            )}
+          </>
+        );
+      })()}
     </div>
   );
 }
