@@ -476,14 +476,14 @@ let syncStatus = { connected: false };
 
 ipcMain.handle('sync-status', () => syncStatus);
 
-// Sync Now — manual trigger for smart sync
+// Sync Now — manual full sync (clears deletion block list, pulls everything)
 ipcMain.handle('sync-now', async () => {
   if (!firebaseSync.isInitialized) {
     await initFirebaseSync();
     applyAllProxies();
     if (!firebaseSync.isInitialized) return { success: false, error: 'Failed to connect' };
   }
-  await firebaseSync.smartSync();
+  await firebaseSync.fullSync();
   const accounts = store.get('accounts') || [];
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sync-accounts-updated', accounts);

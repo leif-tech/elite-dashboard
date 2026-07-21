@@ -310,6 +310,17 @@ function emitStatus(status) {
   if (syncStatusCallback) syncStatusCallback(status);
 }
 
+// ============ FULL SYNC (manual) ============
+// Clears the deletion block list and forces a full sync.
+// Used when user clicks "Sync Now" — intentional action to pull everything.
+async function fullSync() {
+  console.log(`[Sync] Full sync — clearing ${deletedAccountIds.size} deleted IDs`);
+  deletedAccountIds.clear();
+  if (store) store.set('deletedIds', []);
+  lastKnownRemoteTime.clear();
+  await smartSync();
+}
+
 // ============ SMART SYNC ============
 // Uploads changed local sessions, then downloads new/changed remote sessions.
 // Runs automatically every 30 seconds and on startup.
@@ -624,6 +635,7 @@ module.exports = {
   initSync,
   stopSync,
   smartSync,
+  fullSync,
   uploadSession,
   uploadAllSessions,
   markAsDeleted,
