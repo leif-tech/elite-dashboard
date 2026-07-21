@@ -266,15 +266,17 @@ function unregisterProxyAuth(proxy) {
 // Apply saved proxies to account sessions.
 // MUST be called AFTER sync downloads, so partition files exist on disk
 // before session.fromPartition() initializes the session.
-function applyAllProxies() {
+async function applyAllProxies() {
   const savedAccounts = store.get('accounts') || [];
+  const promises = [];
   for (const acct of savedAccounts) {
     if (acct.proxy && acct.proxy.enabled && acct.proxy.host && acct.proxy.port) {
       const ses = session.fromPartition(`persist:of-${acct.id}`);
-      ses.setProxy({ proxyRules: buildProxyRules(acct.proxy) });
+      promises.push(ses.setProxy({ proxyRules: buildProxyRules(acct.proxy) }));
       registerProxyAuth(acct.proxy);
     }
   }
+  if (promises.length > 0) await Promise.all(promises);
 }
 
 // Window controls
@@ -307,7 +309,7 @@ ipcMain.handle('set-api-key', async (_, key) => {
   store.set('apiKey', key);
   if (key) {
     await initFirebaseSync();
-    applyAllProxies();
+    await applyAllProxies();
   }
   return true;
 });
@@ -497,11 +499,11 @@ ipcMain.handle('sync-status', () => syncStatus);
 ipcMain.handle('sync-now', async () => {
   if (!firebaseSync.isInitialized) {
     await initFirebaseSync();
-    applyAllProxies();
+    await applyAllProxies();
     if (!firebaseSync.isInitialized) return { success: false, error: 'Failed to connect' };
   }
   await firebaseSync.fullSync();
-  applyAllProxies();
+  await applyAllProxies();
   const accounts = store.get('accounts') || [];
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sync-accounts-updated', accounts);
@@ -539,11 +541,11 @@ async function initFirebaseSync() {
         }
       },
       // Accounts updated callback (when auto-sync adds new accounts)
-      (accounts) => {
+      async (accounts) => {
+        await applyAllProxies();
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('sync-accounts-updated', accounts);
         }
-        applyAllProxies();
       }
     );
   } catch (err) {
@@ -558,7 +560,7 @@ app.whenReady().then(async () => {
   // Init sync FIRST (downloads remote sessions, writes partition files to disk)
   await initFirebaseSync();
   // THEN apply proxies (safe to call session.fromPartition — files already exist)
-  applyAllProxies();
+  await applyAllProxies();
 });
 
 app.on('before-quit', async (e) => {

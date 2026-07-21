@@ -386,9 +386,10 @@ async function smartSync() {
         if (remote.proxy) {
           const accts = store.get('accounts') || [];
           const idx = accts.findIndex(a => a.id === remote.id);
-          if (idx >= 0) {
+          if (idx >= 0 && JSON.stringify(accts[idx].proxy) !== JSON.stringify(remote.proxy)) {
             accts[idx].proxy = remote.proxy;
             store.set('accounts', accts);
+            accountListChanged = true;
           }
         }
         lastKnownRemoteTime.set(remote.id, remoteUpdatedAt);
