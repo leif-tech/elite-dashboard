@@ -1,10 +1,13 @@
 import { useState } from 'react';
 
-export default function HomeView({ accounts, loginStatus, onSelect, onAdd, apiKeySet, apiAccounts, onApiKeyConnect, syncStatus, onSyncNow, onFactoryReset }) {
+export default function HomeView({ accounts, loginStatus, avatars, onSelect, onAdd, onRemove, onRename, apiKeySet, apiAccounts, onApiKeyConnect, syncStatus, onSyncNow, onFactoryReset }) {
   const [keyInput, setKeyInput] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [error, setError] = useState('');
   const [syncing, setSyncing] = useState(false);
+  const [confirmRemoveId, setConfirmRemoveId] = useState(null);
+  const [renamingId, setRenamingId] = useState(null);
+  const [renameValue, setRenameValue] = useState('');
 
   const handleConnect = async () => {
     const trimmed = keyInput.trim();
@@ -163,21 +166,75 @@ export default function HomeView({ accounts, loginStatus, onSelect, onAdd, apiKe
             ) : (
               <div className="grid grid-cols-2 xl:grid-cols-3 gap-4">
                 {loggedInAccounts.map((acct) => (
-            <button
-              key={acct.id}
-              onClick={() => onSelect(acct.id)}
-              className="card hover:border-accent/40 transition-colors text-left"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-12 h-12 rounded-full bg-dark-500 flex items-center justify-center text-lg font-bold text-gray-400">
-                  {(acct.name || '?')[0].toUpperCase()}
+            <div key={acct.id} className="card hover:border-accent/40 transition-colors text-left relative group">
+              <button
+                onClick={() => renamingId === acct.id ? null : onSelect(acct.id)}
+                className="w-full text-left"
+              >
+                <div className="flex items-center gap-3">
+                  <div className="w-12 h-12 rounded-full bg-dark-500 flex items-center justify-center text-lg font-bold text-gray-400 overflow-hidden shrink-0">
+                    {avatars?.[acct.id] ? (
+                      <img src={avatars[acct.id]} className="w-full h-full object-cover" alt="" referrerPolicy="no-referrer" />
+                    ) : (
+                      (acct.name || '?')[0].toUpperCase()
+                    )}
+                  </div>
+                  <div className="min-w-0">
+                    {renamingId === acct.id ? (
+                      <input
+                        className="input text-sm py-1 px-2 w-full"
+                        value={renameValue}
+                        onChange={(e) => setRenameValue(e.target.value)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') { onRename(acct.id, renameValue); setRenamingId(null); }
+                          if (e.key === 'Escape') setRenamingId(null);
+                        }}
+                        onBlur={() => { if (renameValue.trim()) onRename(acct.id, renameValue); setRenamingId(null); }}
+                        onClick={(e) => e.stopPropagation()}
+                        autoFocus
+                      />
+                    ) : (
+                      <>
+                        <p className="font-semibold truncate">{acct.name}</p>
+                        <p className="text-xs text-gray-500">Click to open OnlyFans</p>
+                      </>
+                    )}
+                  </div>
                 </div>
-                <div>
-                  <p className="font-semibold">{acct.name}</p>
-                  <p className="text-xs text-gray-500">Click to open OnlyFans</p>
-                </div>
+              </button>
+              {/* Action buttons — show on hover */}
+              <div className="absolute top-2 right-2 flex gap-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    setRenameValue(acct.name || '');
+                    setRenamingId(acct.id);
+                  }}
+                  className="px-2 py-1 rounded text-xs text-gray-600 hover:text-accent"
+                  title="Rename account"
+                >
+                  <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M17 3a2.83 2.83 0 1 1 4 4L7.5 20.5 2 22l1.5-5.5Z"/>
+                  </svg>
+                </button>
+                <button
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    if (confirmRemoveId === acct.id) { onRemove(acct.id); setConfirmRemoveId(null); }
+                    else setConfirmRemoveId(acct.id);
+                  }}
+                  onMouseLeave={() => setConfirmRemoveId(null)}
+                  className={`px-2 py-1 rounded text-xs transition-all ${
+                    confirmRemoveId === acct.id
+                      ? 'bg-red-600 text-white'
+                      : 'text-gray-600 hover:text-red-400'
+                  }`}
+                  title={confirmRemoveId === acct.id ? 'Click again to confirm' : 'Remove account'}
+                >
+                  {confirmRemoveId === acct.id ? 'Confirm?' : '✕'}
+                </button>
               </div>
-            </button>
+            </div>
               ))}
               </div>
             )}

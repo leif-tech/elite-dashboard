@@ -40,8 +40,9 @@ export default function App() {
   };
   const [adding, setAdding] = useState(false);
   const [editName, setEditName] = useState('');
-  const [confirmRemove, setConfirmRemove] = useState(null);
   const [hoveredAcct, setHoveredAcct] = useState(null);
+  const [tooltipPos, setTooltipPos] = useState(null);
+  const [avatars, setAvatars] = useState({});
   const [apiAccounts, setApiAccounts] = useState([]);
   const [apiKeySet, setApiKeySet] = useState(false);
   const [syncStatus, setSyncStatus] = useState({ connected: false });
@@ -91,6 +92,10 @@ export default function App() {
       Promise.all([
         window.electronAPI.getAccounts().then((accts) => {
           setAccounts(accts || []);
+          // Initialize avatars from persisted account data
+          const avs = {};
+          (accts || []).forEach(a => { if (a.avatar) avs[a.id] = a.avatar; });
+          setAvatars(avs);
         }),
         window.electronAPI.getApiKey().then((key) => {
           if (key) return loadApiAccounts(key).catch(err => console.warn('API key load failed:', err));
@@ -100,7 +105,14 @@ export default function App() {
       window.electronAPI.onSyncUpdate((status) => setSyncStatus(status));
       window.electronAPI.onSyncAccountsUpdated((accts) => {
         setAccounts(accts || []);
+        // Update avatars from synced account data
+        const avs = {};
+        (accts || []).forEach(a => { if (a.avatar) avs[a.id] = a.avatar; });
+        setAvatars(prev => ({ ...prev, ...avs }));
         refreshLoginStatus();
+      });
+      window.electronAPI.onAvatarExtracted(({ accountId, avatarUrl }) => {
+        setAvatars(prev => ({ ...prev, [accountId]: avatarUrl }));
       });
       // Initial login status check (after sync has completed)
       const initTimer = setTimeout(refreshLoginStatus, 2000);
@@ -134,9 +146,18 @@ export default function App() {
         next.delete(id);
         return next;
       });
-      setConfirmRemove(null);
     } catch (err) {
       console.error('Failed to remove account:', err);
+    }
+  };
+
+  const renameAccount = async (id, newName) => {
+    if (!newName?.trim()) return;
+    try {
+      const updated = await window.electronAPI?.saveAccount({ id, name: newName.trim() });
+      setAccounts(updated);
+    } catch (err) {
+      console.error('Failed to rename account:', err);
     }
   };
 
@@ -244,30 +265,27 @@ export default function App() {
               )}
               <button
                 onClick={() => setActiveId(acct.id)}
-                onMouseEnter={() => setHoveredAcct(acct)}
-                onMouseLeave={() => { setHoveredAcct(null); setConfirmRemove(null); }}
-                className={`w-[42px] h-[42px] rounded-full flex items-center justify-center text-sm font-bold transition-all shrink-0 cursor-grab active:cursor-grabbing ${
+                onMouseEnter={(e) => {
+                  setHoveredAcct(acct);
+                  const rect = e.currentTarget.getBoundingClientRect();
+                  setTooltipPos({ top: rect.top + rect.height / 2 });
+                }}
+                onMouseLeave={() => { setHoveredAcct(null); setTooltipPos(null); }}
+                className={`w-[42px] h-[42px] rounded-full flex items-center justify-center text-sm font-bold transition-all shrink-0 cursor-grab active:cursor-grabbing overflow-hidden ${
                   activeId === acct.id
                     ? 'ring-2 ring-accent ring-offset-2 ring-offset-dark-900 bg-dark-500 text-white'
                     : 'bg-dark-700 text-gray-400 hover:brightness-125'
                 }`}
               >
-                {(acct.name || '?')[0].toUpperCase()}
+                {avatars[acct.id] ? (
+                  <img src={avatars[acct.id]} className="w-full h-full object-cover" alt="" referrerPolicy="no-referrer" />
+                ) : (
+                  (acct.name || '?')[0].toUpperCase()
+                )}
               </button>
               {acct.proxy?.enabled && (
                 <div className="absolute bottom-0 right-1 w-3 h-3 rounded-full bg-green-500 border-2 border-dark-900" />
               )}
-              <button
-                onClick={(e) => {
-                  e.stopPropagation();
-                  if (confirmRemove === acct.id) removeAccount(acct.id);
-                  else setConfirmRemove(acct.id);
-                }}
-                className="absolute -top-1 -right-0.5 w-4 h-4 bg-red-600 rounded-full text-[9px] text-white items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity hidden group-hover:flex"
-                title={confirmRemove === acct.id ? 'Click again to confirm' : 'Remove account'}
-              >
-                &times;
-              </button>
             </div>
           ))}
 
@@ -326,13 +344,14 @@ export default function App() {
           </button>
         </div>
 
-        {/* Hovered account info */}
-        {hoveredAcct && (
-          <div className="border-t border-dark-700 px-1 py-2 flex flex-col items-center gap-0.5 shrink-0 w-full">
-            <p className="text-[10px] font-semibold text-white text-center leading-tight truncate w-full">{hoveredAcct.name}</p>
-            {hoveredAcct.username && (
-              <p className="text-[9px] text-gray-500 text-center leading-tight truncate w-full">{hoveredAcct.username}</p>
-            )}
+        {/* Tooltip — rendered with fixed positioning to escape overflow */}
+        {hoveredAcct && tooltipPos && (
+          <div
+            className="fixed z-50 bg-dark-700 border border-dark-500 rounded-lg px-3 py-1.5 whitespace-nowrap pointer-events-none shadow-lg"
+            style={{ top: tooltipPos.top, left: 64, transform: 'translateY(-50%)' }}
+          >
+            <p className="text-xs font-semibold text-white">{hoveredAcct.name}</p>
+            <div className="absolute right-full top-1/2 -translate-y-1/2 border-4 border-transparent border-r-dark-700" />
           </div>
         )}
 
@@ -368,8 +387,11 @@ export default function App() {
           <HomeView
             accounts={accounts}
             loginStatus={loginStatus}
+            avatars={avatars}
             onSelect={setActiveId}
             onAdd={() => setAdding(true)}
+            onRemove={removeAccount}
+            onRename={renameAccount}
             apiKeySet={apiKeySet}
             apiAccounts={apiAccounts}
             onApiKeyConnect={loadApiAccounts}

@@ -32,6 +32,11 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.removeAllListeners('sync-accounts-updated');
     ipcRenderer.on('sync-accounts-updated', (_, accounts) => callback(accounts));
   },
+  // Avatar extraction
+  onAvatarExtracted: (callback) => {
+    ipcRenderer.removeAllListeners('avatar-extracted');
+    ipcRenderer.on('avatar-extracted', (_, data) => callback(data));
+  },
   // Auto-updater
   onUpdateAvailable: (callback) => {
     ipcRenderer.removeAllListeners('update-available');

@@ -226,6 +226,85 @@ function createWindow() {
       }
     });
 
+    // Extract user avatar from OnlyFans pages (with delay for SPA rendering)
+    wvContents.on('did-finish-load', () => {
+      try {
+        const pageUrl = wvContents.getURL();
+        if (!isOnlyFansHost(pageUrl)) return;
+        // Get account ID from session storage path (partition attr isn't in webPreferences)
+        const storagePath = wvContents.session.storagePath || '';
+        const partMatch = storagePath.match(/[/\\]of-(acct_\d+)/);
+        if (!partMatch) return;
+        const acctId = partMatch[1];
+        // Delay to let the OnlyFans SPA fully render
+        setTimeout(() => {
+          if (wvContents.isDestroyed()) return;
+          wvContents.executeJavaScript(`
+            (() => {
+              try {
+                const results = [];
+                // Method 1: <img> tags
+                const imgs = document.querySelectorAll('img');
+                for (const img of imgs) {
+                  if (img.src && img.src.startsWith('http')) {
+                    const rect = img.getBoundingClientRect();
+                    results.push({ src: img.src, w: Math.round(rect.width), h: Math.round(rect.height), t: Math.round(rect.top), l: Math.round(rect.left) });
+                  }
+                }
+                // Method 2: computed background-image on potential avatar elements
+                const candidates = document.querySelectorAll('[class*="avatar"], [class*="Avatar"], [class*="user"] img, [class*="profile"] img, .g-avatar, .b-profile__user');
+                for (const el of candidates) {
+                  const bg = getComputedStyle(el).backgroundImage;
+                  if (bg && bg !== 'none') {
+                    const m = bg.match(/url\\(["']?(https?:\\/\\/[^"')]+)["']?\\)/);
+                    if (m) {
+                      const rect = el.getBoundingClientRect();
+                      results.push({ src: m[1], w: Math.round(rect.width), h: Math.round(rect.height), t: Math.round(rect.top), l: Math.round(rect.left), bg: true });
+                    }
+                  }
+                }
+                // Method 3: inline style background-images
+                const bgEls = document.querySelectorAll('[style*="background-image"]');
+                for (const el of bgEls) {
+                  const m = el.style.backgroundImage.match(/url\\(["']?(https?:\\/\\/[^"')]+)["']?\\)/);
+                  if (m) {
+                    const rect = el.getBoundingClientRect();
+                    results.push({ src: m[1], w: Math.round(rect.width), h: Math.round(rect.height), t: Math.round(rect.top), l: Math.round(rect.left), bg: true });
+                  }
+                }
+                return JSON.stringify(results);
+              } catch(e) { return JSON.stringify([]); }
+            })()
+          `).then(raw => {
+            try {
+              const images = JSON.parse(raw);
+              // Pick avatar: small image, prefer background-images and those with 'avatar' in URL
+              const avatar = images.find(img =>
+                img.bg && img.w >= 20 && img.w <= 150 && img.h >= 20 && img.h <= 150 &&
+                (img.src.includes('avatar') || img.src.includes('thumbs'))
+              ) || images.find(img =>
+                img.w >= 20 && img.w <= 80 && img.h >= 20 && img.h <= 80 &&
+                img.src.includes('avatar')
+              ) || images.find(img =>
+                img.w >= 20 && img.w <= 80 && img.h >= 20 && img.h <= 80 &&
+                img.src.includes('thumbs') &&
+                !img.src.includes('.svg') && !img.src.includes('emoji')
+              );
+              if (avatar && mainWindow && !mainWindow.isDestroyed()) {
+                const accounts = store.get('accounts') || [];
+                const idx = accounts.findIndex(a => a.id === acctId);
+                if (idx >= 0 && accounts[idx].avatar !== avatar.src) {
+                  accounts[idx].avatar = avatar.src;
+                  store.set('accounts', accounts);
+                }
+                mainWindow.webContents.send('avatar-extracted', { accountId: acctId, avatarUrl: avatar.src });
+              }
+            } catch {}
+          }).catch(() => {});
+        }, 3000);
+      } catch {}
+    });
+
     wvSession.webRequest.onBeforeRequest(
       { urls: ['*://accounts.google.com/*'] },
       (details, callback) => {
