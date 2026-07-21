@@ -17,6 +17,7 @@ let initializedSessions = new Set();
 let cachedDerivedKey = null;
 let cachedKeySource = null;
 let syncInProgress = false;
+let deletedAccountIds = new Set();
 
 const FIREBASE_CONFIG = {
   apiKey: 'AIzaSyCtweAn8fMiNy0940RclIL1t-LZfcbxMwk',
@@ -316,6 +317,11 @@ async function smartSync() {
       const remoteUpdatedAt = remote.updatedAt || 0;
       const lastKnown = lastKnownRemoteTime.get(remote.id) || 0;
 
+      // Skip accounts that were explicitly deleted on this machine
+      if (deletedAccountIds.has(remote.id)) {
+        continue;
+      }
+
       if (!localIds.has(remote.id)) {
         // New account from another device
         console.log(`[Sync] New remote account: ${remote.name}`);
@@ -507,6 +513,12 @@ function startAutoSync() {
 
 // ============ DELETE REMOTE SESSION ============
 async function deleteRemoteSession(accountId) {
+  // Mark as deleted FIRST — prevents smartSync from re-adding during delete
+  deletedAccountIds.add(accountId);
+  lastUploadHashes.delete(accountId);
+  lastKnownRemoteTime.delete(accountId);
+  initializedSessions.delete(accountId);
+
   if (!initialized || !db || !store) return;
   const apiKey = store.get('apiKey');
   if (!apiKey) return;
@@ -514,9 +526,6 @@ async function deleteRemoteSession(accountId) {
   const { doc, deleteDoc } = require('firebase/firestore');
   await deleteDoc(doc(db, `teams/${teamId}/sessions`, accountId));
   await deleteDoc(doc(db, `teams/${teamId}/accounts`, accountId));
-  lastUploadHashes.delete(accountId);
-  lastKnownRemoteTime.delete(accountId);
-  initializedSessions.delete(accountId);
   console.log(`[Sync] Deleted remote session for ${accountId}`);
 }
 
@@ -535,6 +544,7 @@ async function factoryReset() {
   lastUploadHashes.clear();
   lastKnownRemoteTime.clear();
   initializedSessions.clear();
+  deletedAccountIds.clear();
 
   if (initialized && db && store) {
     const apiKey = store.get('apiKey');

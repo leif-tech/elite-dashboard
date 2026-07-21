@@ -370,8 +370,13 @@ ipcMain.handle('remove-account', async (_, id) => {
     fs.rmSync(partDir, { recursive: true, force: true });
   }
   // Delete from Firestore so removed account doesn't reappear via sync
+  // MUST await — if fire-and-forget, smartSync can re-add the account before delete completes
   if (firebaseSync.isInitialized) {
-    firebaseSync.deleteRemoteSession(id).catch(err => console.warn('[Sync] Failed to delete remote session:', err.message));
+    try {
+      await firebaseSync.deleteRemoteSession(id);
+    } catch (err) {
+      console.warn('[Sync] Failed to delete remote session:', err.message);
+    }
   }
   return accounts;
 });
