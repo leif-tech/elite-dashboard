@@ -38,6 +38,7 @@ const store = new Store({
 });
 
 let mainWindow;
+let quitting = false;
 const activePopups = new Map();
 const proxyCredentials = new Map();
 
@@ -62,12 +63,9 @@ function openOAuthPopup(url, partition, wvContents) {
   const ses = session.fromPartition(partition);
   spoofHeaders(ses);
 
+  const ALLOWED_PERMISSIONS = ['clipboard-sanitized-write', 'media'];
   ses.setPermissionRequestHandler((webContents, permission, callback) => {
-    if (permission === 'hid' || permission === 'usb') {
-      callback(false);
-    } else {
-      callback(true);
-    }
+    callback(ALLOWED_PERMISSIONS.includes(permission));
   });
 
   const popup = new BrowserWindow({
@@ -160,6 +158,12 @@ function createWindow() {
 
     const wvSession = session.fromPartition(partition);
     spoofHeaders(wvSession);
+
+    // Restrict permissions — only allow clipboard and media (for OF content)
+    const WV_ALLOWED = ['clipboard-sanitized-write', 'media', 'notifications'];
+    wvSession.setPermissionRequestHandler((wc, permission, callback) => {
+      callback(WV_ALLOWED.includes(permission));
+    });
 
     wvContents.on('will-navigate', (e, url) => {
       if (isOAuthUrl(url)) {
@@ -281,7 +285,9 @@ ipcMain.handle('open-external', (_, url) => {
     if (parsed.protocol === 'https:' || parsed.protocol === 'http:') {
       return shell.openExternal(url);
     }
-  } catch {}
+  } catch (err) {
+    console.warn('[Main] Failed to open external URL:', err.message);
+  }
 });
 
 // ============ ACCOUNT & API KEY IPC ============
@@ -304,8 +310,7 @@ ipcMain.handle('check-all-login-status', async () => {
   for (const acct of accounts) {
     try {
       const ses = session.fromPartition(`persist:of-${acct.id}`);
-      const cookies = await ses.cookies.get({});
-      const ofCookies = cookies.filter(c => c.domain && c.domain.includes('onlyfans.com'));
+      const ofCookies = await ses.cookies.get({ domain: 'onlyfans.com' });
       status[acct.id] = ofCookies.length > 0;
     } catch {
       status[acct.id] = false;
@@ -325,22 +330,35 @@ ipcMain.handle('save-account', (_, account) => {
   if (!account || typeof account.id !== 'string') return store.get('accounts') || [];
   const accounts = store.get('accounts');
   const idx = accounts.findIndex((a) => a.id === account.id);
-  if (idx >= 0) accounts[idx] = { ...accounts[idx], ...account };
+  const isExisting = idx >= 0;
+  if (isExisting) accounts[idx] = { ...accounts[idx], ...account };
   else accounts.push(account);
   store.set('accounts', accounts);
-  if (firebaseSync.isInitialized) {
+  // Only upload existing accounts — new accounts have no session data yet
+  // and uploading would mark them as initialized, preventing partition downloads
+  if (isExisting && firebaseSync.isInitialized) {
     firebaseSync.uploadSession(account.id).catch(() => {});
   }
   return accounts;
 });
 
-ipcMain.handle('remove-account', (_, id) => {
+ipcMain.handle('remove-account', async (_, id) => {
   const allAccounts = store.get('accounts');
   const removed = allAccounts.find((a) => a.id === id);
   const accounts = allAccounts.filter((a) => a.id !== id);
   store.set('accounts', accounts);
   if (removed?.proxy) unregisterProxyAuth(removed.proxy);
-  session.fromPartition(`persist:of-${id}`).clearStorageData();
+  await session.fromPartition(`persist:of-${id}`).clearStorageData();
+  // Clean up partition files from disk
+  const fs = require('fs');
+  const partDir = path.join(app.getPath('userData'), 'Partitions', `of-${id}`);
+  if (fs.existsSync(partDir)) {
+    fs.rmSync(partDir, { recursive: true, force: true });
+  }
+  // Delete from Firestore so removed account doesn't reappear via sync
+  if (firebaseSync.isInitialized) {
+    firebaseSync.deleteRemoteSession(id).catch(err => console.warn('[Sync] Failed to delete remote session:', err.message));
+  }
   return accounts;
 });
 
@@ -493,7 +511,9 @@ app.whenReady().then(async () => {
 });
 
 app.on('before-quit', async (e) => {
+  if (quitting) return;
   if (firebaseSync.isInitialized) {
+    quitting = true;
     e.preventDefault();
     try {
       await Promise.race([

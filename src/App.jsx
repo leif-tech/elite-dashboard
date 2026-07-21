@@ -16,7 +16,7 @@ export default function App() {
   const [dragOverId, setDragOverId] = useState(null);
 
   const refreshLoginStatus = () => {
-    window.electronAPI?.checkAllLoginStatus().then(status => setLoginStatus(status)).catch(() => {});
+    window.electronAPI?.checkAllLoginStatus().then(status => setLoginStatus(status)).catch(err => console.warn('Login status check failed:', err));
   };
 
   const setActiveId = (newId) => {
@@ -48,26 +48,26 @@ export default function App() {
     const insertIdx = newAccounts.findIndex(a => a.id === targetId);
     newAccounts.splice(insertIdx, 0, dragged);
     setAccounts(newAccounts);
-    window.electronAPI.reorderAccounts(newAccounts);
+    window.electronAPI?.reorderAccounts(newAccounts);
   };
 
   const loadApiAccounts = async (key) => {
     if (!key) return;
     setApiKey(key);
-    const accts = await apiListAccounts();
     if (window.electronAPI) await window.electronAPI.setApiKey(key);
+    const accts = await apiListAccounts();
     setApiKeySet(true);
     setApiAccounts(Array.isArray(accts) ? accts : accts?.data || []);
   };
 
   const handleSyncNow = async () => {
-    try { await window.electronAPI?.syncNow(); } catch {}
+    try { await window.electronAPI?.syncNow(); } catch (err) { console.warn('Sync failed:', err); }
     refreshLoginStatus();
   };
 
   const handleFactoryReset = async () => {
     if (!confirm('This will delete ALL accounts and sync data across all devices. You will need to log in again. Continue?')) return;
-    try { await window.electronAPI?.syncFactoryReset(); } catch {}
+    try { await window.electronAPI?.syncFactoryReset(); } catch (err) { console.warn('Factory reset failed:', err); }
     setAccounts([]);
     setLoginStatus({});
     _setActiveId(null);
@@ -80,7 +80,7 @@ export default function App() {
           setAccounts(accts || []);
         }),
         window.electronAPI.getApiKey().then((key) => {
-          if (key) return loadApiAccounts(key).catch(() => {});
+          if (key) return loadApiAccounts(key).catch(err => console.warn('API key load failed:', err));
         }),
         window.electronAPI.syncStatus().then((s) => setSyncStatus(s || { connected: false })),
       ]).finally(() => setIsLoading(false));
@@ -90,7 +90,8 @@ export default function App() {
         refreshLoginStatus();
       });
       // Initial login status check (after sync has completed)
-      setTimeout(refreshLoginStatus, 2000);
+      const initTimer = setTimeout(refreshLoginStatus, 2000);
+      return () => clearTimeout(initTimer);
     } else {
       setIsLoading(false);
     }
@@ -100,7 +101,7 @@ export default function App() {
     const id = `acct_${Date.now()}`;
     const newAcct = { id, name: editName || `Account ${accounts.length + 1}` };
     try {
-      const updated = await window.electronAPI.saveAccount(newAcct);
+      const updated = await window.electronAPI?.saveAccount(newAcct);
       setAccounts(updated);
       setActiveId(id);
       setAdding(false);
@@ -112,7 +113,7 @@ export default function App() {
 
   const removeAccount = async (id) => {
     try {
-      const updated = await window.electronAPI.removeAccount(id);
+      const updated = await window.electronAPI?.removeAccount(id);
       setAccounts(updated);
       if (activeId === id) setActiveId(null);
       setConfirmRemove(null);
@@ -128,8 +129,8 @@ export default function App() {
     if (!acct?.proxy) return;
     const updated = { ...acct.proxy, enabled: !acct.proxy.enabled };
     try {
-      await window.electronAPI.setProxy({ accountId, proxy: updated });
-      const accts = await window.electronAPI.getAccounts();
+      await window.electronAPI?.setProxy({ accountId, proxy: updated });
+      const accts = await window.electronAPI?.getAccounts();
       setAccounts(accts || []);
     } catch (err) {
       console.error('Failed to toggle proxy:', err);
@@ -359,7 +360,7 @@ export default function App() {
                 value={editName}
                 onChange={(e) => setEditName(e.target.value)}
                 autoFocus
-                onKeyDown={(e) => e.key === 'Enter' && addAccount()}
+                onKeyDown={(e) => { if (e.key === 'Enter') addAccount(); if (e.key === 'Escape') { setAdding(false); setEditName(''); } }}
               />
               <div className="flex gap-2">
                 <button onClick={addAccount} className="btn-primary text-xs py-2 flex-1">Add</button>

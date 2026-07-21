@@ -26,7 +26,8 @@ export default function MassMessagesView({ apiAccounts }) {
 
   // Load queue when account changes
   useEffect(() => {
-    if (!selectedAcct) { setQueue([]); setUserLists([]); return; }
+    if (!selectedAcct) { setQueue([]); setUserLists([]); setSelectedLists([]); return; }
+    setSelectedLists([]);
     abortRef.current?.abort();
     const ac = new AbortController();
     abortRef.current = ac;
@@ -38,7 +39,7 @@ export default function MassMessagesView({ apiAccounts }) {
   const loadQueue = async (signal) => {
     setQueueLoading(true);
     try {
-      const result = await listMassMessageQueue(selectedAcct);
+      const result = await listMassMessageQueue(selectedAcct, { signal });
       if (signal?.aborted) return;
       setQueue(Array.isArray(result) ? result : result.list || []);
     } catch (err) {
@@ -50,7 +51,7 @@ export default function MassMessagesView({ apiAccounts }) {
 
   const loadUserLists = async (signal) => {
     try {
-      const result = await listUserLists(selectedAcct);
+      const result = await listUserLists(selectedAcct, { signal });
       if (signal?.aborted) return;
       setUserLists(Array.isArray(result) ? result : result.list || []);
     } catch {

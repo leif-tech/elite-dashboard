@@ -16,7 +16,7 @@ export default function VaultMediaPicker({ accountId, onConfirm, onClose }) {
     const newOffset = reset ? 0 : offset;
     try {
       const type = filter === 'all' ? undefined : filter;
-      const result = await listVaultMedia(accountId, { limit: LIMIT, offset: newOffset, type });
+      const result = await listVaultMedia(accountId, { limit: LIMIT, offset: newOffset, type, signal });
       if (signal?.aborted) return;
       const items = Array.isArray(result) ? result : result.list || [];
       if (reset) {
@@ -44,6 +44,12 @@ export default function VaultMediaPicker({ accountId, onConfirm, onClose }) {
     return () => ac.abort();
   }, [accountId, filter]);
 
+  useEffect(() => {
+    const handleKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', handleKey);
+    return () => window.removeEventListener('keydown', handleKey);
+  }, [onClose]);
+
   const toggleSelect = (item) => {
     setSelected((prev) => {
       const exists = prev.find((s) => s.id === item.id);
@@ -55,8 +61,8 @@ export default function VaultMediaPicker({ accountId, onConfirm, onClose }) {
   const isSelected = (id) => selected.some((s) => s.id === id);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70">
-      <div className="bg-dark-800 border border-dark-500 rounded-xl w-[700px] max-h-[80vh] flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70" onClick={onClose}>
+      <div className="bg-dark-800 border border-dark-500 rounded-xl w-[700px] max-h-[80vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
         {/* Header */}
         <div className="flex items-center justify-between p-4 border-b border-dark-600">
           <h3 className="text-lg font-bold">Vault Media</h3>

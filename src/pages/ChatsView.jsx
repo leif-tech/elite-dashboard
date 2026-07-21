@@ -24,7 +24,7 @@ export default function ChatsView({ apiAccounts }) {
     setLoading(true);
     const newOffset = reset ? 0 : offset;
     try {
-      const result = await listChats(selectedAcct, { limit: LIMIT, offset: newOffset });
+      const result = await listChats(selectedAcct, { limit: LIMIT, offset: newOffset, signal: ac.signal });
       if (ac.signal.aborted) return;
       const items = Array.isArray(result) ? result : result.list || [];
       if (reset) {

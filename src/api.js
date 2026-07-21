@@ -7,9 +7,15 @@ export function setApiKey(key) {
 }
 
 
-async function request(path, { method = 'GET', body } = {}) {
+async function request(path, { method = 'GET', body, signal } = {}) {
   const ac = new AbortController();
   const timeout = setTimeout(() => ac.abort(), 30000);
+
+  if (signal) {
+    if (signal.aborted) { ac.abort(); }
+    else { signal.addEventListener('abort', () => ac.abort(), { once: true }); }
+  }
+
   const opts = {
     method,
     signal: ac.signal,
@@ -38,24 +44,24 @@ async function request(path, { method = 'GET', body } = {}) {
 export const listAccounts = () => request('/accounts');
 
 // Chats
-export const listChats = (acct, { limit = 20, offset = 0 } = {}) =>
-  request(`/${acct}/chats?limit=${limit}&offset=${offset}&skip_users=none`).then((r) => r.data || r);
+export const listChats = (acct, { limit = 20, offset = 0, signal } = {}) =>
+  request(`/${acct}/chats?limit=${limit}&offset=${offset}&skip_users=none`, { signal }).then((r) => r.data || r);
 
 // Mass Messaging
 export const sendMassMessage = (acct, body) =>
   request(`/${acct}/mass-messaging`, { method: 'POST', body });
-export const listMassMessageQueue = (acct, { limit = 20, offset = 0 } = {}) =>
-  request(`/${acct}/mass-messaging?limit=${limit}&offset=${offset}`).then((r) => r.data || r);
+export const listMassMessageQueue = (acct, { limit = 20, offset = 0, signal } = {}) =>
+  request(`/${acct}/mass-messaging?limit=${limit}&offset=${offset}`, { signal }).then((r) => r.data || r);
 export const deleteMassMessage = (acct, id) =>
   request(`/${acct}/mass-messaging/${id}`, { method: 'DELETE' });
 
 // User Lists
-export const listUserLists = (acct) =>
-  request(`/${acct}/user-lists`).then((r) => r.data || r);
+export const listUserLists = (acct, { signal } = {}) =>
+  request(`/${acct}/user-lists`, { signal }).then((r) => r.data || r);
 
 // Vault Media
-export const listVaultMedia = (acct, { limit = 20, offset = 0, type } = {}) => {
+export const listVaultMedia = (acct, { limit = 20, offset = 0, type, signal } = {}) => {
   const params = [`limit=${limit}`, `offset=${offset}`];
   if (type) params.push(`type=${type}`);
-  return request(`/${acct}/media/vault?${params.join('&')}`).then((r) => r.data || r);
+  return request(`/${acct}/media/vault?${params.join('&')}`, { signal }).then((r) => r.data || r);
 };

@@ -289,8 +289,8 @@ async function smartSync() {
     const { collection, getDocs } = require('firebase/firestore');
 
     // Step 1: Upload all local sessions that changed (hash dedup skips unchanged)
-    const localAccounts = store.get('accounts') || [];
-    for (const acct of localAccounts) {
+    const uploadAccounts = store.get('accounts') || [];
+    for (const acct of uploadAccounts) {
       await uploadSession(acct.id, false);
     }
 
@@ -298,6 +298,9 @@ async function smartSync() {
     const accountsSnap = await getDocs(collection(db, `teams/${teamId}/accounts`));
     const remoteAccounts = [];
     accountsSnap.forEach(d => remoteAccounts.push(d.data()));
+
+    // Re-read accounts from store (may have changed during upload phase)
+    const localAccounts = store.get('accounts') || [];
 
     if (remoteAccounts.length === 0) {
       emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: localAccounts.length });
@@ -474,8 +477,32 @@ function startAutoSync() {
   }, 30 * 1000);
 }
 
+// ============ DELETE REMOTE SESSION ============
+async function deleteRemoteSession(accountId) {
+  if (!initialized || !db || !store) return;
+  const apiKey = store.get('apiKey');
+  if (!apiKey) return;
+  const teamId = getTeamId(apiKey);
+  const { doc, deleteDoc } = require('firebase/firestore');
+  await deleteDoc(doc(db, `teams/${teamId}/sessions`, accountId));
+  await deleteDoc(doc(db, `teams/${teamId}/accounts`, accountId));
+  lastUploadHashes.delete(accountId);
+  lastKnownRemoteTime.delete(accountId);
+  initializedSessions.delete(accountId);
+  console.log(`[Sync] Deleted remote session for ${accountId}`);
+}
+
 // ============ FACTORY RESET ============
 async function factoryReset() {
+  // Clean up local partition directories
+  const partitionsDir = path.join(app.getPath('userData'), 'Partitions');
+  if (fs.existsSync(partitionsDir)) {
+    const entries = fs.readdirSync(partitionsDir).filter(e => e.startsWith('of-'));
+    for (const entry of entries) {
+      try { fs.rmSync(path.join(partitionsDir, entry), { recursive: true, force: true }); } catch {}
+    }
+  }
+
   if (store) store.set('accounts', []);
   lastUploadHashes.clear();
   lastKnownRemoteTime.clear();
@@ -508,6 +535,7 @@ module.exports = {
   smartSync,
   uploadSession,
   uploadAllSessions,
+  deleteRemoteSession,
   factoryReset,
   get isInitialized() { return initialized; },
 };

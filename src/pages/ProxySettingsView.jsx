@@ -14,6 +14,7 @@ export default function ProxySettingsView({ accounts }) {
   const [testing, setTesting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [saveError, setSaveError] = useState('');
 
   // Load proxy when account changes
   useEffect(() => {
@@ -28,7 +29,7 @@ export default function ProxySettingsView({ accounts }) {
         }
         setTestResult(null);
         setSaved(false);
-      }).catch(() => {});
+      }).catch(err => console.warn('Failed to load proxy:', err));
     } else {
       setForm({ enabled: true, protocol: 'http', host: '', port: '', username: '', password: '' });
       setTestResult(null);
@@ -62,11 +63,13 @@ export default function ProxySettingsView({ accounts }) {
     const api = window.electronAPI;
     if (!api?.setProxy) return;
     setSaving(true);
+    setSaveError('');
     try {
       await api.setProxy({ accountId: selectedId, proxy: form });
       setSaved(true);
     } catch (err) {
       console.error('Failed to save proxy:', err);
+      setSaveError(err.message || 'Failed to save proxy settings');
     } finally {
       setSaving(false);
     }
@@ -76,10 +79,14 @@ export default function ProxySettingsView({ accounts }) {
     if (!selectedId) return;
     const api = window.electronAPI;
     const cleared = { enabled: false, protocol: 'http', host: '', port: '', username: '', password: '' };
-    setForm(cleared);
-    if (api?.setProxy) await api.setProxy({ accountId: selectedId, proxy: cleared });
-    setTestResult(null);
-    setSaved(false);
+    try {
+      if (api?.setProxy) await api.setProxy({ accountId: selectedId, proxy: cleared });
+      setForm(cleared);
+      setTestResult(null);
+      setSaved(false);
+    } catch (err) {
+      console.error('Failed to clear proxy:', err);
+    }
   };
 
   return (
@@ -198,6 +205,11 @@ export default function ProxySettingsView({ accounts }) {
                 Clear
               </button>
             </div>
+
+            {/* Save error */}
+            {saveError && (
+              <p className="text-xs text-red-400 mt-1">{saveError}</p>
+            )}
 
             {/* Test result */}
             {testResult && (
