@@ -322,8 +322,10 @@ ipcMain.handle('check-all-login-status', async () => {
     try {
       const ses = session.fromPartition(`persist:of-${acct.id}`);
       const ofCookies = await ses.cookies.get({ domain: 'onlyfans.com' });
-      // Check for actual auth cookie, not just any tracking/consent cookie
-      status[acct.id] = ofCookies.some(c => c.name === 'sess' || c.name === 'auth_id' || c.name === 'auth_uid_369');
+      // Require BOTH sess (session token) AND auth_id (user ID) with non-empty values
+      const hasSess = ofCookies.some(c => c.name === 'sess' && c.value && c.value.length > 10);
+      const hasAuthId = ofCookies.some(c => c.name === 'auth_id' && c.value && c.value.length > 0);
+      status[acct.id] = hasSess && hasAuthId;
     } catch {
       status[acct.id] = false;
     }
