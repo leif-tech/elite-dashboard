@@ -66,11 +66,13 @@ export default function App() {
   };
 
   const handleFactoryReset = async () => {
-    if (!confirm('This will delete ALL accounts and sync data across all devices. You will need to log in again. Continue?')) return;
+    if (!confirm('This will delete ALL accounts and sync data across all devices. The app will restart. Continue?')) return;
     try { await window.electronAPI?.syncFactoryReset(); } catch (err) { console.warn('Factory reset failed:', err); }
     setAccounts([]);
     setLoginStatus({});
     _setActiveId(null);
+    // Restart app to fully clear in-memory sessions
+    window.electronAPI?.close();
   };
 
   useEffect(() => {
