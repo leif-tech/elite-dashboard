@@ -10,6 +10,7 @@ import { setApiKey, listAccounts as apiListAccounts } from './api';
 export default function App() {
   const [accounts, setAccounts] = useState([]);
   const [activeId, _setActiveId] = useState(null);
+  const [visitedIds, setVisitedIds] = useState(new Set());
   const [loginStatus, setLoginStatus] = useState({});
   const [isLoading, setIsLoading] = useState(true);
   const [dragId, setDragId] = useState(null);
@@ -26,6 +27,14 @@ export default function App() {
       // Refresh login status after uploading (detects new logins)
       clearTimeout(loginRefreshTimer.current);
       loginRefreshTimer.current = setTimeout(refreshLoginStatus, 1000);
+    }
+    if (newId && newId.startsWith('acct_')) {
+      setVisitedIds(prev => {
+        if (prev.has(newId)) return prev;
+        const next = new Set(prev);
+        next.add(newId);
+        return next;
+      });
     }
     _setActiveId(newId);
   };
@@ -120,13 +129,16 @@ export default function App() {
       const updated = await window.electronAPI?.removeAccount(id);
       setAccounts(updated);
       if (activeId === id) setActiveId(null);
+      setVisitedIds(prev => {
+        const next = new Set(prev);
+        next.delete(id);
+        return next;
+      });
       setConfirmRemove(null);
     } catch (err) {
       console.error('Failed to remove account:', err);
     }
   };
-
-  const active = accounts.find((a) => a.id === activeId);
 
   const toggleProxy = async (accountId) => {
     const acct = accounts.find((a) => a.id === accountId);
@@ -139,36 +151,6 @@ export default function App() {
     } catch (err) {
       console.error('Failed to toggle proxy:', err);
     }
-  };
-
-  const renderMain = () => {
-    if (activeId === '__chats__') {
-      return <ChatsView apiAccounts={apiAccounts} />;
-    }
-    if (activeId === '__mass_messages__') {
-      return <MassMessagesView apiAccounts={apiAccounts} />;
-    }
-    if (activeId === '__proxy_settings__') {
-      return <ProxySettingsView accounts={accounts} />;
-    }
-    if (activeId === null) {
-      return (
-        <HomeView
-          accounts={accounts}
-          loginStatus={loginStatus}
-          onSelect={setActiveId}
-          onAdd={() => setAdding(true)}
-          apiKeySet={apiKeySet}
-          apiAccounts={apiAccounts}
-          onApiKeyConnect={loadApiAccounts}
-          syncStatus={syncStatus}
-          onSyncNow={handleSyncNow}
-          onFactoryReset={handleFactoryReset}
-        />
-      );
-    }
-    const acct = accounts.find((a) => a.id === activeId);
-    return <OFWebview key={activeId} accountId={activeId} proxy={acct?.proxy} onToggleProxy={() => toggleProxy(activeId)} />;
   };
 
   if (isLoading) {
@@ -377,8 +359,36 @@ export default function App() {
       </aside>
 
       {/* Main content */}
-      <main className="flex-1 relative">
-        {renderMain()}
+      <main className="flex-1 relative overflow-hidden">
+        {/* Special views — mount/unmount normally */}
+        {activeId === '__chats__' && <ChatsView apiAccounts={apiAccounts} />}
+        {activeId === '__mass_messages__' && <MassMessagesView apiAccounts={apiAccounts} />}
+        {activeId === '__proxy_settings__' && <ProxySettingsView accounts={accounts} />}
+        {activeId === null && (
+          <HomeView
+            accounts={accounts}
+            loginStatus={loginStatus}
+            onSelect={setActiveId}
+            onAdd={() => setAdding(true)}
+            apiKeySet={apiKeySet}
+            apiAccounts={apiAccounts}
+            onApiKeyConnect={loadApiAccounts}
+            syncStatus={syncStatus}
+            onSyncNow={handleSyncNow}
+            onFactoryReset={handleFactoryReset}
+          />
+        )}
+
+        {/* Persistent account webviews — stay mounted once visited */}
+        {[...visitedIds].map(id => {
+          const acct = accounts.find(a => a.id === id);
+          if (!acct) return null;
+          return (
+            <div key={id} className="absolute inset-0 flex flex-col" style={{ display: activeId === id ? 'flex' : 'none' }}>
+              <OFWebview accountId={id} proxy={acct?.proxy} onToggleProxy={() => toggleProxy(id)} isActive={activeId === id} />
+            </div>
+          );
+        })}
       </main>
       </div>
     </div>

@@ -1,13 +1,14 @@
 import { useState, useEffect, useRef } from 'react';
 import TabWebview from './TabWebview';
 
-export default function OFWebview({ accountId, proxy, onToggleProxy }) {
+export default function OFWebview({ accountId, proxy, onToggleProxy, isActive }) {
   const [tabs, setTabs] = useState([{ id: 1, title: 'OnlyFans', url: 'https://onlyfans.com' }]);
   const [activeTab, setActiveTab] = useState(1);
   const nextId = useRef(2);
 
+  // Only the active webview instance registers the new-tab handler
   useEffect(() => {
-    if (!window.electronAPI?.onOpenNewTab) return;
+    if (!isActive || !window.electronAPI?.onOpenNewTab) return;
     const handler = (url) => {
       const id = nextId.current++;
       setTabs((prev) => [...prev, { id, title: 'Loading...', url }]);
@@ -15,16 +16,9 @@ export default function OFWebview({ accountId, proxy, onToggleProxy }) {
     };
     window.electronAPI.onOpenNewTab(handler);
     return () => {
-      // Clean up listener to prevent stacking on re-renders
       window.electronAPI.onOpenNewTab(() => {});
     };
-  }, []);
-
-  useEffect(() => {
-    setTabs([{ id: 1, title: 'OnlyFans', url: 'https://onlyfans.com' }]);
-    setActiveTab(1);
-    nextId.current = 2;
-  }, [accountId]);
+  }, [isActive]);
 
   const closeTab = (id) => {
     const filtered = tabs.filter((t) => t.id !== id);
