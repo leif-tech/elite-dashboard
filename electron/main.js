@@ -317,31 +317,35 @@ ipcMain.handle('set-api-key', async (_, key) => {
 ipcMain.handle('get-accounts', () => store.get('accounts') || []);
 
 // Check which accounts are actually logged in on OnlyFans
-// Uses real HTTP request — cookies alone can't tell if server-side session expired
+// Primary check: presence of 'sess' cookie. Secondary: HTTP validation (non-proxied only).
 ipcMain.handle('check-all-login-status', async () => {
   const accounts = store.get('accounts') || [];
   const status = {};
   const checks = accounts.map(async (acct) => {
     try {
       const ses = session.fromPartition(`persist:of-${acct.id}`);
-      // Quick cookie pre-check — skip HTTP if no auth cookies at all
       const ofCookies = await ses.cookies.get({ domain: 'onlyfans.com' });
       const hasSess = ofCookies.some(c => c.name === 'sess' && c.value && c.value.length > 10);
       if (!hasSess) { status[acct.id] = false; return; }
       // If proxy is enabled, trust cookie check (ses.fetch can't auth with proxy)
       if (acct.proxy?.enabled) { status[acct.id] = true; return; }
-      // Real validation — fetch authenticated page, check if redirected to login
-      const controller = new AbortController();
-      const timeout = setTimeout(() => controller.abort(), 8000);
-      const response = await ses.fetch('https://onlyfans.com/my/settings', {
-        method: 'GET',
-        redirect: 'manual',
-        signal: controller.signal,
-        headers: { 'User-Agent': CHROME_UA },
-      });
-      clearTimeout(timeout);
-      // 200 = logged in, 3xx = redirect to login/home (session expired)
-      status[acct.id] = response.status === 200;
+      // HTTP validation for non-proxied accounts — but trust cookies on failure
+      try {
+        const controller = new AbortController();
+        const timeout = setTimeout(() => controller.abort(), 8000);
+        const response = await ses.fetch('https://onlyfans.com/my/settings', {
+          method: 'GET',
+          redirect: 'manual',
+          signal: controller.signal,
+          headers: { 'User-Agent': CHROME_UA, ...CHROME_HINTS },
+        });
+        clearTimeout(timeout);
+        // 200 = logged in, 3xx = redirect to login (session expired)
+        status[acct.id] = response.status === 200;
+      } catch {
+        // Network error or timeout — trust cookie check instead of marking logged out
+        status[acct.id] = true;
+      }
     } catch {
       status[acct.id] = false;
     }
