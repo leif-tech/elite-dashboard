@@ -1,7 +1,7 @@
 {
   "name": "elite-dashboard",
-  "version": "1.4.5",
-  "description": "Elite Agency OF Stats Dashboard",
+  "version": "1.5.0",
+  "description": "Elite Agency OF Stats",
   "main": "electron/main.js",
   "scripts": {
     "dev": "concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\"",
@@ -13,7 +13,7 @@
   },
   "build": {
     "appId": "com.eliteagency.dashboard",
-    "productName": "Elite Dashboard",
+    "productName": "Elite Agency",
     "directories": {
       "output": "dist"
     },

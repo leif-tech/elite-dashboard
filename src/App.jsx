@@ -168,7 +168,7 @@ export default function App() {
         className="h-9 bg-dark-900 flex items-center justify-between px-3 shrink-0 select-none"
         style={{ WebkitAppRegion: 'drag' }}
       >
-        <span className="text-xs text-gray-600 font-medium">Elite Dashboard</span>
+        <span className="text-xs text-gray-600 font-medium">Elite Agency</span>
         <div className="flex" style={{ WebkitAppRegion: 'no-drag' }}>
           <button
             onClick={() => window.electronAPI?.minimize()}
