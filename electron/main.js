@@ -582,7 +582,10 @@ app.on('before-quit', async (e) => {
     }
     firebaseSync.stopSync();
     stopAutoUpdater();
-    app.exit();
+    // Use app.quit() instead of app.exit() — allows Electron to flush
+    // cookie databases and session data to disk before the process ends.
+    // The quitting flag prevents before-quit from re-entering.
+    app.quit();
   }
 });
 
