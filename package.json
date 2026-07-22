@@ -1,6 +1,6 @@
 {
   "name": "elite-dashboard",
-  "version": "1.5.2",
+  "version": "1.5.6",
   "description": "Elite Agency OF Stats",
   "main": "electron/main.js",
   "scripts": {

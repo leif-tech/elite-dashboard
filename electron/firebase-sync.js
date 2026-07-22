@@ -264,13 +264,21 @@ async function initSync(electronStore, statusCb, accountsCb) {
 
     // Restore persisted deleted IDs (survive app restart)
     const persistedDeleted = store.get('deletedIds') || [];
-    for (const id of persistedDeleted) deletedAccountIds.add(id);
-    if (persistedDeleted.length > 0) {
-      console.log(`[Sync] Restored ${persistedDeleted.length} deleted IDs from store:`, persistedDeleted);
+    const accts = store.get('accounts') || [];
+
+    // On fresh devices (no local accounts), clear deletedIds —
+    // they only matter for preventing re-sync after intentional deletion on THIS device
+    if (accts.length === 0 && persistedDeleted.length > 0) {
+      console.log(`[Sync] Fresh device detected (no accounts). Clearing ${persistedDeleted.length} stale deletedIds.`);
+      store.set('deletedIds', []);
+    } else {
+      for (const id of persistedDeleted) deletedAccountIds.add(id);
+      if (persistedDeleted.length > 0) {
+        console.log(`[Sync] Restored ${persistedDeleted.length} deleted IDs from store:`, persistedDeleted);
+      }
     }
 
     // Deduplicate accounts on startup (fixes corrupted store from prior bugs)
-    const accts = store.get('accounts') || [];
     const seen = new Set();
     const deduped = accts.filter(a => {
       if (seen.has(a.id)) return false;
@@ -281,6 +289,27 @@ async function initSync(electronStore, statusCb, accountsCb) {
       console.log(`[Sync] Removed ${accts.length - deduped.length} duplicate accounts`);
       store.set('accounts', deduped);
       if (accountsUpdatedCallback) accountsUpdatedCallback(deduped);
+    }
+
+    // Clean up any stale deleted accounts from Firebase
+    // (prevents new devices from downloading expired sessions)
+    if (deletedAccountIds.size > 0) {
+      const apiKey = store.get('apiKey');
+      const teamId = getTeamId(apiKey);
+      const { doc, getDoc, deleteDoc } = require('firebase/firestore');
+      for (const delId of deletedAccountIds) {
+        try {
+          const sessionDoc = doc(db, `teams/${teamId}/sessions`, delId);
+          const snap = await getDoc(sessionDoc);
+          if (snap.exists()) {
+            await deleteDoc(sessionDoc);
+            await deleteDoc(doc(db, `teams/${teamId}/accounts`, delId));
+            console.log(`[Sync] Cleaned up deleted account from Firebase: ${delId}`);
+          }
+        } catch (err) {
+          console.warn(`[Sync] Cleanup failed for ${delId}:`, err.message);
+        }
+      }
     }
 
     // Initial sync — automatically downloads new accounts from other devices
@@ -502,18 +531,26 @@ async function uploadSession(accountId, force = false) {
 
     const payload = { cookies, partition: packed ? packed.toString('base64') : null };
     const payloadStr = JSON.stringify(payload);
-    const hash = crypto.createHash('sha256').update(payloadStr).digest('hex');
+    let hash = crypto.createHash('sha256').update(payloadStr).digest('hex');
     if (!force && lastUploadHashes.get(accountId) === hash) return;
 
     const compressed = zlib.gzipSync(Buffer.from(payloadStr, 'utf8'));
     const encrypted = encrypt(compressed, apiKey);
-    const b64 = encrypted.toString('base64');
+    let b64 = encrypted.toString('base64');
 
     if (b64.length > 900000) {
-      const sizeKB = Math.round(b64.length / 1024);
-      console.error(`[Sync] Data too large for ${accountId}: ${sizeKB}KB`);
-      emitStatus({ connected: true, warning: `Session data too large to sync (${sizeKB}KB). Clear browser data in that account to reduce size.` });
-      return;
+      // Payload too large with partition files — retry with cookies only
+      console.warn(`[Sync] Full payload too large for ${accountId} (${Math.round(b64.length / 1024)}KB), retrying cookies-only`);
+      const cookiesOnly = { cookies, partition: null };
+      const cookiesStr = JSON.stringify(cookiesOnly);
+      const cookiesCompressed = zlib.gzipSync(Buffer.from(cookiesStr, 'utf8'));
+      const cookiesEncrypted = encrypt(cookiesCompressed, apiKey);
+      b64 = cookiesEncrypted.toString('base64');
+      hash = crypto.createHash('sha256').update(cookiesStr).digest('hex');
+      if (b64.length > 900000) {
+        console.error(`[Sync] Even cookies-only too large for ${accountId}: ${Math.round(b64.length / 1024)}KB`);
+        return;
+      }
     }
 
     const teamId = getTeamId(apiKey);
@@ -570,9 +607,8 @@ async function uploadSession(accountId, force = false) {
 async function uploadAllSessions(force = false) {
   if (!initialized || !store) return;
   const accounts = store.get('accounts') || [];
-  for (const acct of accounts) {
-    await uploadSession(acct.id, force);
-  }
+  // Upload all accounts in parallel — prevents quit timeout from cutting off later accounts
+  await Promise.all(accounts.map(acct => uploadSession(acct.id, force)));
 }
 
 // ============ AUTO SYNC ============

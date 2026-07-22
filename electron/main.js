@@ -397,7 +397,9 @@ ipcMain.handle('set-api-key', async (_, key) => {
 ipcMain.handle('get-accounts', () => store.get('accounts') || []);
 
 // Check which accounts are actually logged in on OnlyFans
-// Primary check: presence of 'sess' cookie. Secondary: HTTP validation (non-proxied only).
+// Trust the 'sess' cookie — if it exists, show the account as logged in.
+// HTTP validation was unreliable on new devices (Cloudflare, fingerprinting).
+// If the session truly expired, the user sees the login page in the webview.
 ipcMain.handle('check-all-login-status', async () => {
   const accounts = store.get('accounts') || [];
   const status = {};
@@ -406,31 +408,21 @@ ipcMain.handle('check-all-login-status', async () => {
       const ses = session.fromPartition(`persist:of-${acct.id}`);
       const ofCookies = await ses.cookies.get({ domain: 'onlyfans.com' });
       const hasSess = ofCookies.some(c => c.name === 'sess' && c.value && c.value.length > 10);
-      if (!hasSess) { status[acct.id] = false; return; }
-      // If proxy is enabled, trust cookie check (ses.fetch can't auth with proxy)
-      if (acct.proxy?.enabled) { status[acct.id] = true; return; }
-      // HTTP validation for non-proxied accounts — but trust cookies on failure
-      try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 8000);
-        const response = await ses.fetch('https://onlyfans.com/my/settings', {
-          method: 'GET',
-          redirect: 'manual',
-          signal: controller.signal,
-          headers: { 'User-Agent': CHROME_UA, ...CHROME_HINTS },
-        });
-        clearTimeout(timeout);
-        // 200 = logged in, 3xx = redirect to login (session expired)
-        status[acct.id] = response.status === 200;
-      } catch {
-        // Network error or timeout — trust cookie check instead of marking logged out
-        status[acct.id] = true;
-      }
+      status[acct.id] = hasSess;
     } catch {
       status[acct.id] = false;
     }
   });
   await Promise.all(checks);
+  // After checking login status, upload any logged-in accounts in background.
+  // Hash dedup skips unchanged sessions, so this is cheap for already-synced accounts
+  // but ensures newly-logged-in accounts are immediately pushed to Firebase.
+  if (firebaseSync.isInitialized) {
+    const loggedIn = Object.entries(status).filter(([, v]) => v).map(([id]) => id);
+    if (loggedIn.length > 0) {
+      Promise.all(loggedIn.map(id => firebaseSync.uploadSession(id, false))).catch(() => {});
+    }
+  }
   return status;
 });
 
@@ -649,24 +641,40 @@ app.whenReady().then(async () => {
 
 app.on('before-quit', async (e) => {
   if (quitting) return;
+  quitting = true;
+  e.preventDefault();
+
+  // Stop auto-sync FIRST — prevents concurrent smartSync from downloading
+  // stale cookies that overwrite valid ones during quit
+  firebaseSync.stopSync();
+  stopAutoUpdater();
+
+  // Explicitly flush ALL partition cookie stores to disk.
+  // app.quit() only flushes sessions attached to live webContents —
+  // partition sessions created via session.fromPartition() may not be flushed.
+  const accounts = store.get('accounts') || [];
+  try {
+    await Promise.all(accounts.map(async (acct) => {
+      try {
+        const ses = session.fromPartition(`persist:of-${acct.id}`);
+        await ses.cookies.flushStore();
+      } catch {}
+    }));
+  } catch {}
+
+  // Upload to Firebase (cookies already safe on disk)
   if (firebaseSync.isInitialized) {
-    quitting = true;
-    e.preventDefault();
     try {
       await Promise.race([
         firebaseSync.uploadAllSessions(false),
-        new Promise((_, reject) => setTimeout(() => reject(new Error('Quit sync timeout')), 5000)),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Quit sync timeout')), 10000)),
       ]);
     } catch (err) {
       console.error('[Sync] Quit sync failed:', err.message);
     }
-    firebaseSync.stopSync();
-    stopAutoUpdater();
-    // Use app.quit() instead of app.exit() — allows Electron to flush
-    // cookie databases and session data to disk before the process ends.
-    // The quitting flag prevents before-quit from re-entering.
-    app.quit();
   }
+
+  app.quit();
 });
 
 app.on('window-all-closed', () => {
