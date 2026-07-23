@@ -7,6 +7,7 @@ const { initAutoUpdater, stopAutoUpdater } = require('./updater');
 const { generateFingerprint } = require('./fingerprint-profiles');
 const { PROVIDERS, buildProxyForAccount, rotateProxy } = require('./proxy-providers');
 const proxyHealth = require('./proxy-health');
+const safeCreds = require('./safe-credentials');
 
 // Load fingerprint injection script as string at startup
 const INJECT_SCRIPT = fs.readFileSync(path.join(__dirname, 'fingerprint-inject.js'), 'utf8');
@@ -71,7 +72,7 @@ function getFingerprintForPartition(partition) {
   const match = partition.match(/^persist:of-(acct_\d+)$/);
   if (!match) return null;
   const accountId = match[1];
-  const accounts = store.get('accounts') || [];
+  const accounts = safeCreds.getAccounts() || [];
   const acct = accounts.find(a => a.id === accountId);
   const fp = acct?.fingerprint || null;
   if (fp) fingerprintCache.set(partition, fp);
@@ -405,11 +406,11 @@ function createWindow() {
                 !img.src.includes('.svg') && !img.src.includes('emoji')
               );
               if (avatar && mainWindow && !mainWindow.isDestroyed()) {
-                const accounts = store.get('accounts') || [];
+                const accounts = safeCreds.getAccounts() || [];
                 const idx = accounts.findIndex(a => a.id === acctId);
                 if (idx >= 0 && accounts[idx].avatar !== avatar.src) {
                   accounts[idx].avatar = avatar.src;
-                  store.set('accounts', accounts);
+                  safeCreds.setAccounts(accounts);
                 }
                 mainWindow.webContents.send('avatar-extracted', { accountId: acctId, avatarUrl: avatar.src });
               }
@@ -461,7 +462,7 @@ function unregisterProxyAuth(proxy) {
 // MUST be called AFTER sync downloads, so partition files exist on disk
 // before session.fromPartition() initializes the session.
 async function applyAllProxies() {
-  const savedAccounts = store.get('accounts') || [];
+  const savedAccounts = safeCreds.getAccounts() || [];
   const promises = [];
   for (const acct of savedAccounts) {
     if (acct.proxy && acct.proxy.enabled && acct.proxy.host && acct.proxy.port) {
@@ -493,14 +494,14 @@ ipcMain.handle('open-external', (_, url) => {
 });
 
 // ============ ACCOUNT & API KEY IPC ============
-ipcMain.handle('get-api-key', () => store.get('apiKey'));
+ipcMain.handle('get-api-key', () => safeCreds.getApiKey());
 ipcMain.handle('set-api-key', async (_, key) => {
-  const oldKey = store.get('apiKey');
+  const oldKey = safeCreds.getApiKey();
   // If key is changing and sync was active, stop old sync first
   if (oldKey && oldKey !== key && firebaseSync.isInitialized) {
     firebaseSync.stopSync();
   }
-  store.set('apiKey', key);
+  safeCreds.setApiKey(key);
   if (key) {
     await initFirebaseSync();
     await applyAllProxies();
@@ -508,14 +509,14 @@ ipcMain.handle('set-api-key', async (_, key) => {
   return true;
 });
 
-ipcMain.handle('get-accounts', () => store.get('accounts') || []);
+ipcMain.handle('get-accounts', () => safeCreds.getAccounts() || []);
 
 // Check which accounts are actually logged in on OnlyFans
 // Trust the 'sess' cookie — if it exists, show the account as logged in.
 // HTTP validation was unreliable on new devices (Cloudflare, fingerprinting).
 // If the session truly expired, the user sees the login page in the webview.
 ipcMain.handle('check-all-login-status', async () => {
-  const accounts = store.get('accounts') || [];
+  const accounts = safeCreds.getAccounts() || [];
   const status = {};
   const checks = accounts.map(async (acct) => {
     try {
@@ -545,8 +546,8 @@ ipcMain.handle('check-all-login-status', async () => {
 
 // Save reordered accounts array — only accept an array of IDs, not full objects
 ipcMain.handle('reorder-accounts', (_, orderedIds) => {
-  if (!Array.isArray(orderedIds)) return store.get('accounts') || [];
-  const existing = store.get('accounts') || [];
+  if (!Array.isArray(orderedIds)) return safeCreds.getAccounts() || [];
+  const existing = safeCreds.getAccounts() || [];
   const byId = new Map(existing.map((a) => [a.id, a]));
   // Reorder using existing account objects (prevents data injection)
   const reordered = orderedIds.filter((id) => typeof id === 'string' && byId.has(id)).map((id) => byId.get(id));
@@ -554,13 +555,13 @@ ipcMain.handle('reorder-accounts', (_, orderedIds) => {
   for (const a of existing) {
     if (!orderedIds.includes(a.id)) reordered.push(a);
   }
-  store.set('accounts', reordered);
+  safeCreds.setAccounts(reordered);
   return reordered;
 });
 
 ipcMain.handle('save-account', async (_, account) => {
-  if (!account || typeof account.id !== 'string') return store.get('accounts') || [];
-  const accounts = store.get('accounts');
+  if (!account || typeof account.id !== 'string') return safeCreds.getAccounts() || [];
+  const accounts = safeCreds.getAccounts();
   const idx = accounts.findIndex((a) => a.id === account.id);
   const isExisting = idx >= 0;
   // Auto-generate fingerprint for new accounts
@@ -569,7 +570,7 @@ ipcMain.handle('save-account', async (_, account) => {
   }
   // Auto-assign proxy for new accounts when provider is configured
   if (!isExisting && !account.proxy) {
-    const providerConfig = store.get('proxyProvider');
+    const providerConfig = safeCreds.getProxyProvider();
     if (providerConfig && providerConfig.type !== 'manual' && providerConfig.autoAssign) {
       const proxy = buildProxyForAccount(providerConfig, account.id);
       if (proxy) {
@@ -583,7 +584,7 @@ ipcMain.handle('save-account', async (_, account) => {
   }
   if (isExisting) accounts[idx] = { ...accounts[idx], ...account };
   else accounts.push(account);
-  store.set('accounts', accounts);
+  safeCreds.setAccounts(accounts);
   invalidateFingerprintCache(account.id);
   // Only upload existing accounts — new accounts have no session data yet
   // and uploading would mark them as initialized, preventing partition downloads
@@ -597,10 +598,10 @@ ipcMain.handle('remove-account', async (_, id) => {
   // Mark as deleted IMMEDIATELY — before any async work — so smartSync can't re-add
   firebaseSync.markAsDeleted(id);
   invalidateFingerprintCache(id);
-  const allAccounts = store.get('accounts');
+  const allAccounts = safeCreds.getAccounts();
   const removed = allAccounts.find((a) => a.id === id);
   const accounts = allAccounts.filter((a) => a.id !== id);
-  store.set('accounts', accounts);
+  safeCreds.setAccounts(accounts);
   if (removed?.proxy) unregisterProxyAuth(removed.proxy);
 
   // Delete from Firestore FIRST — this is critical, must happen before anything that can fail
@@ -638,12 +639,12 @@ ipcMain.handle('set-proxy', async (_, data) => {
   if (!data || typeof data.accountId !== 'string') return false;
   const { accountId, proxy } = data;
   if (proxy && (typeof proxy.host !== 'string' || typeof proxy.port !== 'string')) return false;
-  const accounts = store.get('accounts');
+  const accounts = safeCreds.getAccounts();
   const idx = accounts.findIndex((a) => a.id === accountId);
   if (idx < 0) return false;
   const oldProxy = accounts[idx].proxy;
   accounts[idx].proxy = proxy;
-  store.set('accounts', accounts);
+  safeCreds.setAccounts(accounts);
   const ses = session.fromPartition(`persist:of-${accountId}`);
   if (oldProxy) unregisterProxyAuth(oldProxy);
   if (proxy && proxy.enabled && proxy.host && proxy.port) {
@@ -692,16 +693,16 @@ ipcMain.handle('test-proxy', async (_, { proxy }) => {
 });
 
 ipcMain.handle('get-proxy', (_, accountId) => {
-  const accounts = store.get('accounts');
+  const accounts = safeCreds.getAccounts();
   const acct = accounts.find((a) => a.id === accountId);
   return acct?.proxy || null;
 });
 
 // ============ PROXY PROVIDER IPC ============
-ipcMain.handle('get-proxy-provider', () => store.get('proxyProvider'));
+ipcMain.handle('get-proxy-provider', () => safeCreds.getProxyProvider());
 
 ipcMain.handle('set-proxy-provider', (_, config) => {
-  store.set('proxyProvider', config);
+  safeCreds.setProxyProvider(config);
   return config;
 });
 
@@ -714,19 +715,19 @@ ipcMain.handle('get-proxy-providers-list', () => {
 });
 
 ipcMain.handle('apply-provider-proxy', async (_, accountId) => {
-  const providerConfig = store.get('proxyProvider');
+  const providerConfig = safeCreds.getProxyProvider();
   if (!providerConfig || providerConfig.type === 'manual') return false;
   const proxy = buildProxyForAccount(providerConfig, accountId);
   if (!proxy) return false;
 
-  const accounts = store.get('accounts');
+  const accounts = safeCreds.getAccounts();
   const idx = accounts.findIndex(a => a.id === accountId);
   if (idx < 0) return false;
 
   const oldProxy = accounts[idx].proxy;
   if (oldProxy) unregisterProxyAuth(oldProxy);
   accounts[idx].proxy = proxy;
-  store.set('accounts', accounts);
+  safeCreds.setAccounts(accounts);
 
   const ses = session.fromPartition(`persist:of-${accountId}`);
   await ses.setProxy({ proxyRules: buildProxyRules(proxy) });
@@ -739,9 +740,9 @@ ipcMain.handle('apply-provider-proxy-all', async () => {
   if (applyingAll) return false; // prevent concurrent overwrites (IPC-7)
   applyingAll = true;
   try {
-    const providerConfig = store.get('proxyProvider');
+    const providerConfig = safeCreds.getProxyProvider();
     if (!providerConfig || providerConfig.type === 'manual') return false;
-    const accounts = store.get('accounts');
+    const accounts = safeCreds.getAccounts();
 
     for (const acct of accounts) {
       const proxy = buildProxyForAccount(providerConfig, acct.id);
@@ -754,7 +755,7 @@ ipcMain.handle('apply-provider-proxy-all', async () => {
       registerProxyAuth(proxy);
     }
 
-    store.set('accounts', accounts);
+    safeCreds.setAccounts(accounts);
     return accounts;
   } finally {
     applyingAll = false;
@@ -762,10 +763,10 @@ ipcMain.handle('apply-provider-proxy-all', async () => {
 });
 
 ipcMain.handle('rotate-proxy', async (_, accountId) => {
-  const providerConfig = store.get('proxyProvider');
+  const providerConfig = safeCreds.getProxyProvider();
   if (!providerConfig || providerConfig.type === 'manual') return { success: false, error: 'No provider configured' };
 
-  const accounts = store.get('accounts');
+  const accounts = safeCreds.getAccounts();
   const idx = accounts.findIndex(a => a.id === accountId);
   if (idx < 0) return { success: false, error: 'Account not found' };
 
@@ -776,7 +777,7 @@ ipcMain.handle('rotate-proxy', async (_, accountId) => {
   if (!proxy) return { success: false, error: 'Failed to generate proxy' };
 
   accounts[idx].proxy = proxy;
-  store.set('accounts', accounts);
+  safeCreds.setAccounts(accounts);
 
   const ses = session.fromPartition(`persist:of-${accountId}`);
   await ses.setProxy({ proxyRules: buildProxyRules(proxy) });
@@ -791,7 +792,7 @@ ipcMain.handle('rotate-proxy', async (_, accountId) => {
 ipcMain.handle('get-proxy-health', () => proxyHealth.getHealthData());
 
 ipcMain.handle('check-proxy-health', async (_, accountId) => {
-  const accounts = store.get('accounts');
+  const accounts = safeCreds.getAccounts();
   const acct = accounts.find(a => a.id === accountId);
   if (!acct?.proxy) return null;
   return await proxyHealth.checkSingleProxy(accountId, acct.proxy);
@@ -803,7 +804,7 @@ ipcMain.handle('check-all-proxy-health', async () => {
 });
 
 ipcMain.handle('dns-leak-test', async (_, accountId) => {
-  const accounts = store.get('accounts');
+  const accounts = safeCreds.getAccounts();
   const acct = accounts.find(a => a.id === accountId);
   if (!acct?.proxy) return { success: false, error: 'No proxy configured' };
   return await proxyHealth.runDnsLeakTest(acct.proxy);
@@ -813,12 +814,12 @@ ipcMain.handle('dns-leak-test', async (_, accountId) => {
 function startRotationScheduler() {
   // Check every 10 minutes if any accounts need IP rotation
   rotationInterval = setInterval(async () => {
-    const providerConfig = store.get('proxyProvider');
+    const providerConfig = safeCreds.getProxyProvider();
     if (!providerConfig || providerConfig.type === 'manual') return;
     if (!providerConfig.rotation?.enabled || !providerConfig.rotation?.intervalHours) return;
 
     const intervalMs = providerConfig.rotation.intervalHours * 60 * 60 * 1000;
-    const accounts = store.get('accounts');
+    const accounts = safeCreds.getAccounts();
     const now = Date.now();
     let rotated = false;
 
@@ -841,7 +842,7 @@ function startRotationScheduler() {
     }
 
     if (rotated) {
-      store.set('accounts', accounts);
+      safeCreds.setAccounts(accounts);
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('proxies-rotated', accounts);
       }
@@ -883,7 +884,7 @@ ipcMain.handle('sync-now', async () => {
   }
   await firebaseSync.fullSync();
   await applyAllProxies();
-  const accounts = store.get('accounts') || [];
+  const accounts = safeCreds.getAccounts() || [];
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sync-accounts-updated', accounts);
   }
@@ -910,7 +911,7 @@ ipcMain.handle('sync-factory-reset', async () => {
 });
 
 async function initFirebaseSync() {
-  const apiKey = store.get('apiKey');
+  const apiKey = safeCreds.getApiKey();
   if (!apiKey) return;
 
   try {
@@ -930,7 +931,8 @@ async function initFirebaseSync() {
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('sync-accounts-updated', accounts);
         }
-      }
+      },
+      safeCreds
     );
   } catch (err) {
     console.error('[Sync] Failed to init:', err.message);
@@ -939,9 +941,11 @@ async function initFirebaseSync() {
 
 // ============ APP LIFECYCLE ============
 app.whenReady().then(async () => {
+  safeCreds.initCredentials(store);
+
   // Migrate existing accounts: generate fingerprints for any that don't have one,
   // or regenerate if fingerprint version is outdated (e.g. v2 → v3 Chrome update)
-  const existingAccounts = store.get('accounts') || [];
+  const existingAccounts = safeCreds.getAccounts() || [];
   let migrated = 0;
   for (const acct of existingAccounts) {
     if (!acct.fingerprint || acct.fingerprint.version < 3) {
@@ -950,7 +954,7 @@ app.whenReady().then(async () => {
     }
   }
   if (migrated > 0) {
-    store.set('accounts', existingAccounts);
+    safeCreds.setAccounts(existingAccounts);
     console.log(`[Fingerprint] Migrated ${migrated} accounts to v3 fingerprints`);
   }
 
@@ -961,7 +965,7 @@ app.whenReady().then(async () => {
   // THEN apply proxies (safe to call session.fromPartition — files already exist)
   await applyAllProxies();
   // Start health monitoring and rotation scheduler
-  proxyHealth.startHealthMonitoring(store, mainWindow);
+  proxyHealth.startHealthMonitoring(store, mainWindow, safeCreds);
   startRotationScheduler();
 });
 
@@ -980,7 +984,7 @@ app.on('before-quit', async (e) => {
   // Explicitly flush ALL partition cookie stores to disk.
   // app.quit() only flushes sessions attached to live webContents —
   // partition sessions created via session.fromPartition() may not be flushed.
-  const accounts = store.get('accounts') || [];
+  const accounts = safeCreds.getAccounts() || [];
   try {
     await Promise.all(accounts.map(async (acct) => {
       try {

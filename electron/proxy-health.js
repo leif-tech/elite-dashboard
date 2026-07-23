@@ -9,6 +9,7 @@ const healthData = new Map();
 let healthInterval = null;
 let storeRef = null;
 let windowRef = null;
+let credsRef = null;
 let checkingAll = false; // reentrancy guard
 
 // Thresholds
@@ -97,7 +98,7 @@ async function checkAllProxies() {
   if (checkingAll) return; // reentrancy guard — prevent overlapping bulk checks (IPC-8)
   checkingAll = true;
   try {
-    const accounts = storeRef.get('accounts') || [];
+    const accounts = credsRef.getAccounts();
     for (const acct of accounts) {
       if (acct.proxy?.enabled && acct.proxy?.host) {
         await checkSingleProxy(acct.id, acct.proxy);
@@ -114,9 +115,10 @@ async function checkAllProxies() {
   }
 }
 
-function startHealthMonitoring(store, mainWindow) {
+function startHealthMonitoring(store, mainWindow, credentialsModule) {
   storeRef = store;
   windowRef = mainWindow;
+  credsRef = credentialsModule || { getAccounts: () => store.get('accounts') || [] };
   // Initial check after 10s (let app settle)
   setTimeout(() => checkAllProxies().catch(() => {}), 10000);
   // Then every 5 minutes

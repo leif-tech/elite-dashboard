@@ -19,6 +19,11 @@ let cachedDerivedKey = null;
 let cachedKeySource = null;
 let syncInProgress = false;
 let deletedAccountIds = new Set();
+let creds = {
+  getApiKey() { return store ? (store.get('apiKey') || '') : ''; },
+  getAccounts() { return store ? (store.get('accounts') || []) : []; },
+  setAccounts(a) { if (store) store.set('accounts', a); },
+};
 
 // Mark an account as deleted IMMEDIATELY — must be called before any async work
 // so smartSync can't slip in between store removal and deletion tracking
@@ -247,12 +252,13 @@ async function importCookies(accountId, cookies) {
 }
 
 // ============ CORE ============
-async function initSync(electronStore, statusCb, accountsCb) {
+async function initSync(electronStore, statusCb, accountsCb, credentialsModule) {
   store = electronStore;
   syncStatusCallback = statusCb;
   accountsUpdatedCallback = accountsCb;
+  if (credentialsModule) creds = credentialsModule;
 
-  const apiKey = store.get('apiKey');
+  const apiKey = creds.getApiKey();
   if (!apiKey) {
     emitStatus({ connected: false, error: 'No API key set' });
     return false;
@@ -275,7 +281,7 @@ async function initSync(electronStore, statusCb, accountsCb) {
 
     // Restore persisted deleted IDs (survive app restart)
     const persistedDeleted = store.get('deletedIds') || [];
-    const accts = store.get('accounts') || [];
+    const accts = creds.getAccounts() || [];
 
     // On fresh devices (no local accounts), clear deletedIds —
     // they only matter for preventing re-sync after intentional deletion on THIS device
@@ -298,14 +304,14 @@ async function initSync(electronStore, statusCb, accountsCb) {
     });
     if (deduped.length < accts.length) {
       console.log(`[Sync] Removed ${accts.length - deduped.length} duplicate accounts`);
-      store.set('accounts', deduped);
+      creds.setAccounts(deduped);
       if (accountsUpdatedCallback) accountsUpdatedCallback(deduped);
     }
 
     // Clean up any stale deleted accounts from Firebase
     // (prevents new devices from downloading expired sessions)
     if (deletedAccountIds.size > 0) {
-      const apiKey = store.get('apiKey');
+      const apiKey = creds.getApiKey();
       const teamId = getTeamId(apiKey);
       const { doc, getDoc, deleteDoc } = require('firebase/firestore');
       for (const delId of deletedAccountIds) {
@@ -367,14 +373,14 @@ async function smartSync() {
   syncInProgress = true;
 
   try {
-    const apiKey = store.get('apiKey');
+    const apiKey = creds.getApiKey();
     if (!apiKey) return;
 
     const teamId = getTeamId(apiKey);
     const { collection, getDocs } = require('firebase/firestore');
 
     // Step 1: Upload all local sessions that changed (hash dedup skips unchanged)
-    const uploadAccounts = store.get('accounts') || [];
+    const uploadAccounts = creds.getAccounts() || [];
     for (const acct of uploadAccounts) {
       await uploadSession(acct.id, false);
     }
@@ -385,7 +391,7 @@ async function smartSync() {
     accountsSnap.forEach(d => remoteAccounts.push(d.data()));
 
     // Re-read accounts from store (may have changed during upload phase)
-    const localAccounts = store.get('accounts') || [];
+    const localAccounts = creds.getAccounts() || [];
 
     if (remoteAccounts.length === 0) {
       emitStatus({ connected: true, lastSync: new Date().toISOString(), accounts: localAccounts.length });
@@ -438,11 +444,11 @@ async function smartSync() {
         await downloadSession(remote.id, apiKey, teamId);
         // Sync proxy settings from remote
         if (remoteMeta.proxy) {
-          const accts = store.get('accounts') || [];
+          const accts = creds.getAccounts() || [];
           const idx = accts.findIndex(a => a.id === remote.id);
           if (idx >= 0 && JSON.stringify(accts[idx].proxy) !== JSON.stringify(remoteMeta.proxy)) {
             accts[idx].proxy = remoteMeta.proxy;
-            store.set('accounts', accts);
+            creds.setAccounts(accts);
             accountListChanged = true;
           }
         }
@@ -452,7 +458,7 @@ async function smartSync() {
 
     if (accountListChanged) {
       // Re-read store to avoid overwriting concurrent changes (e.g., account deletion)
-      const currentAccounts = store.get('accounts') || [];
+      const currentAccounts = creds.getAccounts() || [];
       const currentIds = new Set(currentAccounts.map(a => a.id));
       // Only ADD truly new accounts — never overwrite or duplicate
       const newAccounts = updatedLocalAccounts.filter(a =>
@@ -460,13 +466,13 @@ async function smartSync() {
       );
       if (newAccounts.length > 0) {
         const merged = [...currentAccounts, ...newAccounts];
-        store.set('accounts', merged);
+        creds.setAccounts(merged);
         if (accountsUpdatedCallback) accountsUpdatedCallback(merged);
       }
     }
 
     // Report count from current store (not stale snapshot)
-    const finalAccounts = store.get('accounts') || [];
+    const finalAccounts = creds.getAccounts() || [];
     emitStatus({
       connected: true,
       lastSync: new Date().toISOString(),
@@ -540,7 +546,7 @@ async function uploadSession(accountId, force = false) {
   if (!initialized || !db || !store) return;
   if (deletedAccountIds.has(accountId)) return;
 
-  const apiKey = store.get('apiKey');
+  const apiKey = creds.getApiKey();
   if (!apiKey) return;
 
   try {
@@ -604,7 +610,7 @@ async function uploadSession(accountId, force = false) {
       });
     });
 
-    const accounts = store.get('accounts') || [];
+    const accounts = creds.getAccounts() || [];
     const acct = accounts.find(a => a.id === accountId);
     if (acct) {
       // Encrypt sensitive metadata (name, proxy creds, fingerprint) — SEC-22
@@ -635,7 +641,7 @@ async function uploadSession(accountId, force = false) {
 
 async function uploadAllSessions(force = false) {
   if (!initialized || !store) return;
-  const accounts = store.get('accounts') || [];
+  const accounts = creds.getAccounts() || [];
   // Upload all accounts in parallel — prevents quit timeout from cutting off later accounts
   await Promise.all(accounts.map(acct => uploadSession(acct.id, force)));
 }
@@ -657,7 +663,7 @@ async function deleteRemoteSession(accountId) {
   initializedSessions.delete(accountId);
 
   if (!initialized || !db || !store) return;
-  const apiKey = store.get('apiKey');
+  const apiKey = creds.getApiKey();
   if (!apiKey) return;
   const teamId = getTeamId(apiKey);
   const { doc, deleteDoc } = require('firebase/firestore');
@@ -687,7 +693,7 @@ async function factoryReset() {
   }
 
   if (store) {
-    store.set('accounts', []);
+    creds.setAccounts([]);
     store.set('deletedIds', []);
   }
   lastUploadHashes.clear();
@@ -696,7 +702,7 @@ async function factoryReset() {
   deletedAccountIds.clear();
 
   if (initialized && db && store) {
-    const apiKey = store.get('apiKey');
+    const apiKey = creds.getApiKey();
     if (apiKey) {
       try {
         const teamId = getTeamId(apiKey);
