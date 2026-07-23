@@ -39,7 +39,7 @@
     },
     "publish": {
       "provider": "github",
-      "owner": "leif-tech",
+      "owner": "silv-tech",
       "repo": "elite-dashboard"
     }
   },
