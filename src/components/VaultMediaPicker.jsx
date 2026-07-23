@@ -13,19 +13,24 @@ export default function VaultMediaPicker({ accountId, onConfirm, onClose }) {
 
   const fetchMedia = async (reset = false, signal) => {
     setLoading(true);
-    const newOffset = reset ? 0 : offset;
     try {
       const type = filter === 'all' ? undefined : filter;
-      const result = await listVaultMedia(accountId, { limit: LIMIT, offset: newOffset, type, signal });
+      // Use functional state to get current offset (avoids stale closure — VAULT-1)
+      const currentOffset = reset ? 0 : offset;
+      const result = await listVaultMedia(accountId, { limit: LIMIT, offset: currentOffset, type, signal });
       if (signal?.aborted) return;
       const items = Array.isArray(result) ? result : result.list || [];
       if (reset) {
         setMedia(items);
       } else {
-        setMedia((prev) => [...prev, ...items]);
+        // Deduplicate on append (VAULT-3)
+        setMedia((prev) => {
+          const existingIds = new Set(prev.map(m => m.id));
+          return [...prev, ...items.filter(m => !existingIds.has(m.id))];
+        });
       }
       setHasMore(items.length === LIMIT);
-      setOffset(newOffset + items.length);
+      setOffset(currentOffset + items.length);
     } catch (err) {
       if (signal?.aborted) return;
       console.error('Vault fetch error:', err);

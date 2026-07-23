@@ -7,6 +7,11 @@ export function setApiKey(key) {
 }
 
 
+// Sanitize path segments to prevent path traversal
+function safePath(segment) {
+  return encodeURIComponent(String(segment).replace(/[./\\]/g, ''));
+}
+
 async function request(path, { method = 'GET', body, signal } = {}) {
   const ac = new AbortController();
   const timeout = setTimeout(() => ac.abort(), 30000);
@@ -45,23 +50,23 @@ export const listAccounts = () => request('/accounts');
 
 // Chats
 export const listChats = (acct, { limit = 20, offset = 0, signal } = {}) =>
-  request(`/${acct}/chats?limit=${limit}&offset=${offset}&skip_users=none`, { signal }).then((r) => r.data || r);
+  request(`/${safePath(acct)}/chats?limit=${limit}&offset=${offset}&skip_users=none`, { signal }).then((r) => r.data || r);
 
 // Mass Messaging
 export const sendMassMessage = (acct, body) =>
-  request(`/${acct}/mass-messaging`, { method: 'POST', body });
+  request(`/${safePath(acct)}/mass-messaging`, { method: 'POST', body });
 export const listMassMessageQueue = (acct, { limit = 20, offset = 0, signal } = {}) =>
-  request(`/${acct}/mass-messaging?limit=${limit}&offset=${offset}`, { signal }).then((r) => r.data || r);
+  request(`/${safePath(acct)}/mass-messaging?limit=${limit}&offset=${offset}`, { signal }).then((r) => r.data || r);
 export const deleteMassMessage = (acct, id) =>
-  request(`/${acct}/mass-messaging/${id}`, { method: 'DELETE' });
+  request(`/${safePath(acct)}/mass-messaging/${safePath(id)}`, { method: 'DELETE' });
 
 // User Lists
 export const listUserLists = (acct, { signal } = {}) =>
-  request(`/${acct}/user-lists`, { signal }).then((r) => r.data || r);
+  request(`/${safePath(acct)}/user-lists`, { signal }).then((r) => r.data || r);
 
 // Vault Media
 export const listVaultMedia = (acct, { limit = 20, offset = 0, type, signal } = {}) => {
   const params = [`limit=${limit}`, `offset=${offset}`];
-  if (type) params.push(`type=${type}`);
-  return request(`/${acct}/media/vault?${params.join('&')}`, { signal }).then((r) => r.data || r);
+  if (type) params.push(`type=${encodeURIComponent(type)}`);
+  return request(`/${safePath(acct)}/media/vault?${params.join('&')}`, { signal }).then((r) => r.data || r);
 };

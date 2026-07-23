@@ -15,6 +15,26 @@ contextBridge.exposeInMainWorld('electronAPI', {
   setProxy: (data) => ipcRenderer.invoke('set-proxy', data),
   testProxy: (data) => ipcRenderer.invoke('test-proxy', data),
   getProxy: (accountId) => ipcRenderer.invoke('get-proxy', accountId),
+  // Proxy Provider
+  getProxyProvider: () => ipcRenderer.invoke('get-proxy-provider'),
+  setProxyProvider: (config) => ipcRenderer.invoke('set-proxy-provider', config),
+  getProxyProvidersList: () => ipcRenderer.invoke('get-proxy-providers-list'),
+  applyProviderProxy: (accountId) => ipcRenderer.invoke('apply-provider-proxy', accountId),
+  applyProviderProxyAll: () => ipcRenderer.invoke('apply-provider-proxy-all'),
+  rotateProxy: (accountId) => ipcRenderer.invoke('rotate-proxy', accountId),
+  // Proxy Health
+  getProxyHealth: () => ipcRenderer.invoke('get-proxy-health'),
+  checkProxyHealth: (accountId) => ipcRenderer.invoke('check-proxy-health', accountId),
+  checkAllProxyHealth: () => ipcRenderer.invoke('check-all-proxy-health'),
+  dnsLeakTest: (accountId) => ipcRenderer.invoke('dns-leak-test', accountId),
+  onProxyHealthUpdate: (callback) => {
+    ipcRenderer.removeAllListeners('proxy-health-update');
+    ipcRenderer.on('proxy-health-update', (_, data) => callback(data));
+  },
+  onProxiesRotated: (callback) => {
+    ipcRenderer.removeAllListeners('proxies-rotated');
+    ipcRenderer.on('proxies-rotated', (_, accounts) => callback(accounts));
+  },
   minimize: () => ipcRenderer.invoke('win-minimize'),
   maximize: () => ipcRenderer.invoke('win-maximize'),
   close: () => ipcRenderer.invoke('win-close'),

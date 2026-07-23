@@ -1,8 +1,6 @@
 import { useState, useEffect, useRef } from 'react';
 import './index.css';
-import ProxySettingsView from './pages/ProxySettingsView';
-import MassMessagesView from './pages/MassMessagesView';
-import ChatsView from './pages/ChatsView';
+import ProxyDashboardView from './pages/ProxyDashboardView';
 import HomeView from './pages/HomeView';
 import OFWebview from './components/OFWebview';
 import { setApiKey, listAccounts as apiListAccounts } from './api';
@@ -46,6 +44,7 @@ export default function App() {
   const [apiAccounts, setApiAccounts] = useState([]);
   const [apiKeySet, setApiKeySet] = useState(false);
   const [syncStatus, setSyncStatus] = useState({ connected: false });
+  const [proxyHealth, setProxyHealth] = useState({});
 
   // Only logged-in accounts appear in the sidebar
   const sidebarAccounts = accounts.filter(a => loginStatus[a.id]);
@@ -60,7 +59,7 @@ export default function App() {
     const insertIdx = newAccounts.findIndex(a => a.id === targetId);
     newAccounts.splice(insertIdx, 0, dragged);
     setAccounts(newAccounts);
-    window.electronAPI?.reorderAccounts(newAccounts);
+    window.electronAPI?.reorderAccounts(newAccounts.map(a => a.id));
   };
 
   const loadApiAccounts = async (key) => {
@@ -114,6 +113,11 @@ export default function App() {
       window.electronAPI.onAvatarExtracted(({ accountId, avatarUrl }) => {
         setAvatars(prev => ({ ...prev, [accountId]: avatarUrl }));
       });
+      window.electronAPI.onProxyHealthUpdate(setProxyHealth);
+      window.electronAPI.onProxiesRotated((accts) => {
+        setAccounts(accts || []);
+      });
+      window.electronAPI.getProxyHealth().then(h => { if (h) setProxyHealth(h); });
       // Initial login status check (after sync has completed)
       const initTimer = setTimeout(refreshLoginStatus, 2000);
       return () => clearTimeout(initTimer);
@@ -310,33 +314,11 @@ export default function App() {
             <div className={`absolute bottom-1 right-1 w-2.5 h-2.5 rounded-full border border-dark-900 ${syncStatus.connected ? 'bg-green-500' : 'bg-red-500'}`} />
           </div>
           <button
-            onClick={() => setActiveId('__chats__')}
-            className={`w-9 h-9 rounded-lg flex items-center justify-center transition-colors ${
-              activeId === '__chats__' ? 'text-accent' : 'text-gray-600 hover:text-white'
-            }`}
-            title="Messages"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"/>
-            </svg>
-          </button>
-          <button
-            onClick={() => setActiveId('__mass_messages__')}
-            className={`w-9 h-9 rounded-lg flex items-center justify-center transition-colors ${
-              activeId === '__mass_messages__' ? 'text-accent' : 'text-gray-600 hover:text-white'
-            }`}
-            title="Mass Messages"
-          >
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 11.5a8.38 8.38 0 0 1-.9 3.8 8.5 8.5 0 0 1-7.6 4.7 8.38 8.38 0 0 1-3.8-.9L3 21l1.9-5.7a8.38 8.38 0 0 1-.9-3.8 8.5 8.5 0 0 1 4.7-7.6 8.38 8.38 0 0 1 3.8-.9h.5a8.48 8.48 0 0 1 8 8v.5z"/>
-            </svg>
-          </button>
-          <button
             onClick={() => setActiveId('__proxy_settings__')}
             className={`w-9 h-9 rounded-lg flex items-center justify-center transition-colors ${
               activeId === '__proxy_settings__' ? 'text-accent' : 'text-gray-600 hover:text-white'
             }`}
-            title="Proxy Settings"
+            title="Proxy Dashboard"
           >
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
               <circle cx="12" cy="12" r="3"/><path d="M12 1v4M12 19v4M4.22 4.22l2.83 2.83M16.95 16.95l2.83 2.83M1 12h4M19 12h4M4.22 19.78l2.83-2.83M16.95 7.05l2.83-2.83"/>
@@ -380,9 +362,7 @@ export default function App() {
       {/* Main content */}
       <main className="flex-1 relative overflow-hidden">
         {/* Special views — mount/unmount normally */}
-        {activeId === '__chats__' && <ChatsView apiAccounts={apiAccounts} />}
-        {activeId === '__mass_messages__' && <MassMessagesView apiAccounts={apiAccounts} />}
-        {activeId === '__proxy_settings__' && <ProxySettingsView accounts={accounts} />}
+        {activeId === '__proxy_settings__' && <ProxyDashboardView accounts={accounts} loginStatus={loginStatus} onAccountsChanged={setAccounts} />}
         {activeId === null && (
           <HomeView
             accounts={accounts}
@@ -407,7 +387,7 @@ export default function App() {
           if (!acct) return null;
           return (
             <div key={id} className="absolute inset-0 flex flex-col" style={{ display: activeId === id ? 'flex' : 'none' }}>
-              <OFWebview accountId={id} proxy={acct?.proxy} onToggleProxy={() => toggleProxy(id)} isActive={activeId === id} />
+              <OFWebview accountId={id} proxy={acct?.proxy} onToggleProxy={() => toggleProxy(id)} isActive={activeId === id} proxyHealth={proxyHealth[id]} />
             </div>
           );
         })}

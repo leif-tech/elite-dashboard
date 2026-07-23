@@ -137,6 +137,7 @@ export default function HomeView({ accounts, loginStatus, avatars, onSelect, onA
             </button>
             <button
               onClick={async () => {
+                if (!confirm('Factory Reset will delete ALL accounts and session data (local + cloud). This cannot be undone. Continue?')) return;
                 setSyncing(true);
                 try { await onFactoryReset(); } catch {}
                 setSyncing(false);

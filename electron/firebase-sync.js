@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
+const { generateFingerprint } = require('./fingerprint-profiles');
 
 // Firebase SDK (lazy loaded in initSync)
 let firebaseApp, db, auth;
@@ -198,11 +199,21 @@ async function importCookies(accountId, cookies) {
   const ses = session.fromPartition(`persist:of-${accountId}`);
   initializedSessions.add(accountId);
 
+  // Allowed cookie domains — only accept OnlyFans-related domains (SYNC-4)
+  const ALLOWED_DOMAINS = ['onlyfans.com', '.onlyfans.com'];
+  const isAllowedDomain = (domain) => {
+    if (!domain) return false;
+    const d = domain.toLowerCase();
+    return d === 'onlyfans.com' || d === '.onlyfans.com' || d.endsWith('.onlyfans.com');
+  };
+
   let imported = 0, failed = 0;
   const errors = [];
   for (const cookie of cookies) {
     try {
       if (!cookie.name || !cookie.url) { failed++; continue; }
+      // Validate domain — reject arbitrary cookies (SYNC-4)
+      if (cookie.domain && !isAllowedDomain(cookie.domain)) { failed++; continue; }
       const setCookie = {
         url: cookie.url,
         name: cookie.name,
@@ -396,13 +407,27 @@ async function smartSync() {
         continue;
       }
 
+      // Decrypt remote metadata if encrypted (v2), fallback to plaintext for backward compat
+      let remoteMeta = { name: remote.name, proxy: remote.proxy, fingerprint: remote.fingerprint };
+      if (remote.metaVersion === 2 && remote.encryptedMeta) {
+        try {
+          const metaBuf = Buffer.from(remote.encryptedMeta, 'base64');
+          const metaDecrypted = decrypt(metaBuf, apiKey);
+          remoteMeta = JSON.parse(zlib.gunzipSync(metaDecrypted).toString('utf8'));
+        } catch (err) {
+          console.warn(`[Sync] Failed to decrypt metadata for ${remote.id}:`, err.message);
+        }
+      }
+
       if (!localIds.has(remote.id)) {
         // New account from another device — include proxy settings
-        console.log(`[Sync] New remote account: ${remote.id} (${remote.name}). localIds:`, [...localIds], 'deletedIds:', [...deletedAccountIds]);
+        console.log(`[Sync] New remote account: ${remote.id} (${remoteMeta.name}). localIds:`, [...localIds], 'deletedIds:', [...deletedAccountIds]);
         const ok = await downloadSession(remote.id, apiKey, teamId);
         if (ok) {
-          const newAcct = { id: remote.id, name: remote.name };
-          if (remote.proxy) newAcct.proxy = remote.proxy;
+          const newAcct = { id: remote.id, name: remoteMeta.name };
+          if (remoteMeta.proxy) newAcct.proxy = remoteMeta.proxy;
+          // Use remote fingerprint if available, otherwise generate one (older devices without fingerprints)
+          newAcct.fingerprint = remoteMeta.fingerprint || generateFingerprint(remote.id);
           updatedLocalAccounts.push(newAcct);
           localIds.add(remote.id);
           lastKnownRemoteTime.set(remote.id, remoteUpdatedAt);
@@ -412,11 +437,11 @@ async function smartSync() {
         // Session updated by another device since our last check
         await downloadSession(remote.id, apiKey, teamId);
         // Sync proxy settings from remote
-        if (remote.proxy) {
+        if (remoteMeta.proxy) {
           const accts = store.get('accounts') || [];
           const idx = accts.findIndex(a => a.id === remote.id);
-          if (idx >= 0 && JSON.stringify(accts[idx].proxy) !== JSON.stringify(remote.proxy)) {
-            accts[idx].proxy = remote.proxy;
+          if (idx >= 0 && JSON.stringify(accts[idx].proxy) !== JSON.stringify(remoteMeta.proxy)) {
+            accts[idx].proxy = remoteMeta.proxy;
             store.set('accounts', accts);
             accountListChanged = true;
           }
@@ -582,10 +607,14 @@ async function uploadSession(accountId, force = false) {
     const accounts = store.get('accounts') || [];
     const acct = accounts.find(a => a.id === accountId);
     if (acct) {
+      // Encrypt sensitive metadata (name, proxy creds, fingerprint) — SEC-22
+      const metadata = { name: acct.name, proxy: acct.proxy || null, fingerprint: acct.fingerprint || null };
+      const metaCompressed = zlib.gzipSync(Buffer.from(JSON.stringify(metadata), 'utf8'));
+      const metaEncrypted = encrypt(metaCompressed, apiKey).toString('base64');
       await setDoc(doc(db, `teams/${teamId}/accounts`, accountId), {
         id: acct.id,
-        name: acct.name,
-        proxy: acct.proxy || null,
+        encryptedMeta: metaEncrypted,
+        metaVersion: 2,
         updatedAt: now,
         updatedBy: machineId,
       });
@@ -632,8 +661,17 @@ async function deleteRemoteSession(accountId) {
   if (!apiKey) return;
   const teamId = getTeamId(apiKey);
   const { doc, deleteDoc } = require('firebase/firestore');
-  await deleteDoc(doc(db, `teams/${teamId}/sessions`, accountId));
-  await deleteDoc(doc(db, `teams/${teamId}/accounts`, accountId));
+  // Wrap each deletion in try/catch to prevent partial failure (SYNC-5)
+  try {
+    await deleteDoc(doc(db, `teams/${teamId}/sessions`, accountId));
+  } catch (err) {
+    console.warn(`[Sync] Failed to delete session doc for ${accountId}:`, err.message);
+  }
+  try {
+    await deleteDoc(doc(db, `teams/${teamId}/accounts`, accountId));
+  } catch (err) {
+    console.warn(`[Sync] Failed to delete account doc for ${accountId}:`, err.message);
+  }
   console.log(`[Sync] Deleted remote session for ${accountId}`);
 }
 

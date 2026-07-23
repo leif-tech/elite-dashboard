@@ -99,7 +99,7 @@ export default function ChatsView({ apiAccounts }) {
             ].map((f) => (
               <button
                 key={f.key}
-                onClick={() => setFilter(f.key)}
+                onClick={() => { setFilter(f.key); setOffset(0); }}
                 className={`px-3.5 py-1 rounded-full text-xs font-medium transition-colors ${
                   filter === f.key
                     ? 'bg-accent text-white'

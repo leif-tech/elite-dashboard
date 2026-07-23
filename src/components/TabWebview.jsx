@@ -1,13 +1,17 @@
 import { useState, useEffect, useRef } from 'react';
 
-export default function TabWebview({ accountId, tabId, initialUrl, isActive, proxy, onToggleProxy, onTitleChange }) {
+export default function TabWebview({ accountId, tabId, initialUrl, isActive, proxy, onToggleProxy, proxyHealth, onTitleChange }) {
   const webviewRef = useRef(null);
+  const urlInputRef = useRef(null);
   const onTitleChangeRef = useRef(onTitleChange);
   onTitleChangeRef.current = onTitleChange;
   const [url, setUrl] = useState(initialUrl);
+  const [urlInput, setUrlInput] = useState('');
+  const [editing, setEditing] = useState(false);
   const [canGoBack, setCanGoBack] = useState(false);
   const [canGoForward, setCanGoForward] = useState(false);
   const [loading, setLoading] = useState(true);
+  const [rotating, setRotating] = useState(false);
 
   useEffect(() => {
     const wv = webviewRef.current;
@@ -48,41 +52,136 @@ export default function TabWebview({ accountId, tabId, initialUrl, isActive, pro
   const reload = () => webviewRef.current?.reload();
   const goHome = () => webviewRef.current?.loadURL('https://onlyfans.com');
 
+  const startEditing = () => {
+    setUrlInput(url);
+    setEditing(true);
+    setTimeout(() => urlInputRef.current?.select(), 0);
+  };
+
+  const navigate = () => {
+    let target = urlInput.trim();
+    if (!target) { setEditing(false); return; }
+    if (!/^https?:\/\//i.test(target)) {
+      if (/^[a-zA-Z0-9].*\.[a-zA-Z]{2,}/.test(target)) {
+        target = 'https://' + target;
+      } else {
+        target = 'https://www.google.com/search?q=' + encodeURIComponent(target);
+      }
+    }
+    webviewRef.current?.loadURL(target);
+    setEditing(false);
+  };
+
+  const NavBtn = ({ onClick, disabled, title, children }) => (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      title={title}
+      className="w-8 h-8 flex items-center justify-center rounded-full text-gray-400 hover:text-white hover:bg-white/5 disabled:opacity-25 disabled:hover:bg-transparent transition-colors"
+    >
+      {children}
+    </button>
+  );
+
+  // Extract display URL — show domain prominently
+  const displayUrl = (() => {
+    try {
+      const u = new URL(url);
+      return { protocol: u.protocol + '//', host: u.host, path: u.pathname + u.search + u.hash };
+    } catch {
+      return null;
+    }
+  })();
+
   return (
     <div className={`flex flex-col ${isActive ? 'flex-1' : 'hidden'}`}>
-      <div className="flex items-center gap-2 px-3 py-2 bg-dark-800 border-b border-dark-600">
-        <button onClick={goBack} disabled={!canGoBack} className="p-1.5 rounded hover:bg-dark-600 disabled:opacity-30 transition-colors">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
-        </button>
-        <button onClick={goForward} disabled={!canGoForward} className="p-1.5 rounded hover:bg-dark-600 disabled:opacity-30 transition-colors">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
-        </button>
-        <button onClick={reload} className="p-1.5 rounded hover:bg-dark-600 transition-colors">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" className={loading ? 'animate-spin' : ''}>
+      {/* Nav bar */}
+      <div className="flex items-center gap-1 px-2 py-1.5 bg-dark-800 border-b border-dark-700/50">
+        <NavBtn onClick={goBack} disabled={!canGoBack} title="Back">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M19 12H5M12 19l-7-7 7-7"/></svg>
+        </NavBtn>
+        <NavBtn onClick={goForward} disabled={!canGoForward} title="Forward">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M12 5l7 7-7 7"/></svg>
+        </NavBtn>
+        <NavBtn onClick={reload} title="Reload">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className={loading ? 'animate-spin' : ''}>
             <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
           </svg>
-        </button>
-        <button onClick={goHome} className="p-1.5 rounded hover:bg-dark-600 transition-colors" title="OnlyFans Home">
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
-        </button>
+        </NavBtn>
+        <NavBtn onClick={goHome} title="OnlyFans Home">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+        </NavBtn>
 
-        <div className="flex-1 bg-dark-900 rounded-lg px-3 py-1.5 text-xs text-gray-500 truncate border border-dark-600">
-          {url}
-        </div>
-
-        {proxy && (
-          <button
-            onClick={onToggleProxy}
-            className={`flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-xs font-medium border transition-colors ${
-              proxy.enabled
-                ? 'border-green-600/40 text-green-400 hover:bg-green-600/10'
-                : 'border-dark-500 text-gray-500 hover:bg-dark-600'
-            }`}
-            title={proxy.enabled ? 'Proxy active — click to disable' : 'Proxy disabled — click to enable'}
+        {/* URL bar */}
+        {editing ? (
+          <input
+            ref={urlInputRef}
+            className="flex-1 bg-dark-700 rounded-full px-4 py-1.5 text-xs text-white border border-accent/60 outline-none placeholder-gray-600 mx-1"
+            value={urlInput}
+            onChange={e => setUrlInput(e.target.value)}
+            onKeyDown={e => {
+              if (e.key === 'Enter') navigate();
+              if (e.key === 'Escape') setEditing(false);
+            }}
+            onBlur={() => setEditing(false)}
+            placeholder="Search or enter URL"
+            autoFocus
+          />
+        ) : (
+          <div
+            onClick={startEditing}
+            className="flex-1 bg-dark-700/60 hover:bg-dark-700 rounded-full px-4 py-1.5 text-xs truncate cursor-text transition-colors mx-1 flex items-center gap-0.5"
           >
-            <div className={`w-2 h-2 rounded-full ${proxy.enabled ? 'bg-green-500' : 'bg-gray-600'}`} />
-            {proxy.enabled ? 'Proxy ON' : 'Proxy OFF'}
-          </button>
+            {displayUrl ? (
+              <>
+                <span className="text-gray-600">{displayUrl.protocol}</span>
+                <span className="text-gray-300">{displayUrl.host}</span>
+                <span className="text-gray-600">{displayUrl.path !== '/' ? displayUrl.path : ''}</span>
+              </>
+            ) : (
+              <span className="text-gray-500">{url}</span>
+            )}
+          </div>
+        )}
+
+        {/* Proxy controls */}
+        {proxy && (
+          <div className="flex items-center gap-1 ml-1">
+            {proxy.providerType && proxy.providerType !== 'manual' && proxy.enabled && (
+              <button
+                onClick={async () => {
+                  setRotating(true);
+                  await window.electronAPI?.rotateProxy(accountId);
+                  setRotating(false);
+                }}
+                disabled={rotating}
+                className="h-7 px-2.5 rounded-full text-[11px] text-gray-400 hover:text-white hover:bg-white/5 border border-dark-600 transition-colors disabled:opacity-40 flex items-center gap-1"
+                title="Rotate IP"
+              >
+                <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+                  <polyline points="23 4 23 10 17 10"/><path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"/>
+                </svg>
+                {rotating ? '...' : 'Rotate'}
+              </button>
+            )}
+            <button
+              onClick={onToggleProxy}
+              className={`h-7 flex items-center gap-1.5 px-2.5 rounded-full text-[11px] font-medium transition-colors ${
+                proxy.enabled
+                  ? 'bg-green-500/10 text-green-400 hover:bg-green-500/20'
+                  : 'bg-dark-600/50 text-gray-500 hover:bg-dark-600'
+              }`}
+              title={proxy.enabled ? 'Proxy active — click to disable' : 'Proxy disabled — click to enable'}
+            >
+              <div className={`w-2 h-2 rounded-full ${
+                proxyHealth?.status === 'healthy' ? 'bg-green-400' :
+                proxyHealth?.status === 'degraded' ? 'bg-yellow-400' :
+                proxyHealth?.status === 'dead' ? 'bg-red-400' :
+                proxy.enabled ? 'bg-green-400' : 'bg-gray-600'
+              }`} />
+              {proxy.enabled ? 'Proxy' : 'No Proxy'}
+            </button>
+          </div>
         )}
       </div>
 
@@ -90,7 +189,6 @@ export default function TabWebview({ accountId, tabId, initialUrl, isActive, pro
         ref={webviewRef}
         src={initialUrl}
         partition={`persist:of-${accountId}`}
-        useragent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
         className="flex-1"
         style={{ width: '100%', height: '100%' }}
         allowpopups="true"

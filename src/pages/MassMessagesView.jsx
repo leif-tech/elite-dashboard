@@ -68,10 +68,17 @@ export default function MassMessagesView({ apiAccounts }) {
         text: message,
         media_ids: attachedMedia.map((m) => m.id),
       };
-      if (ppvEnabled && ppvPrice) body.price = parseFloat(ppvPrice);
+      if (ppvEnabled && ppvPrice) {
+        const price = parseFloat(ppvPrice);
+        if (isNaN(price) || price < 1) { alert('PPV price must be at least $1'); setSending(false); return; }
+        body.price = price;
+      }
       if (audience === 'active') body.audience = 'active';
       else if (audience === 'expired') body.audience = 'expired';
-      else if (audience === 'lists') body.user_list_ids = selectedLists;
+      else if (audience === 'lists') {
+        if (selectedLists.length === 0) { alert('Select at least one user list'); setSending(false); return; }
+        body.user_list_ids = selectedLists;
+      }
       if (scheduleEnabled && scheduleDate) body.scheduled_at = new Date(scheduleDate).toISOString();
 
       await sendMassMessage(selectedAcct, body);

@@ -1,14 +1,22 @@
 const { app, BrowserWindow, ipcMain, session, net, Menu, clipboard, shell } = require('electron');
 const path = require('path');
+const fs = require('fs');
 const Store = require('electron-store').default;
 const firebaseSync = require('./firebase-sync');
 const { initAutoUpdater, stopAutoUpdater } = require('./updater');
+const { generateFingerprint } = require('./fingerprint-profiles');
+const { PROVIDERS, buildProxyForAccount, rotateProxy } = require('./proxy-providers');
+const proxyHealth = require('./proxy-health');
 
-const CHROME_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36';
+// Load fingerprint injection script as string at startup
+const INJECT_SCRIPT = fs.readFileSync(path.join(__dirname, 'fingerprint-inject.js'), 'utf8');
 
-const CHROME_HINTS = {
-  'sec-ch-ua': '"Chromium";v="126", "Not/A)Brand";v="8", "Google Chrome";v="126"',
+// Fallback UA for non-account sessions (OAuth popups before fingerprint lookup, etc.)
+const FALLBACK_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.7871.182 Safari/537.36';
+
+const FALLBACK_HINTS = {
+  'sec-ch-ua': '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
   'sec-ch-ua-mobile': '?0',
   'sec-ch-ua-platform': '"Windows"',
 };
@@ -34,34 +42,86 @@ function isOnlyFansHost(url) {
 }
 
 const store = new Store({
-  defaults: { apiKey: '', accounts: [] },
+  defaults: {
+    apiKey: '',
+    accounts: [],
+    proxyProvider: {
+      type: 'manual',
+      username: '',
+      password: '',
+      country: 'us',
+      autoAssign: false,
+      rotation: { enabled: false, intervalHours: 4 },
+    },
+  },
 });
 
 let mainWindow;
 let quitting = false;
+let rotationInterval = null;
 const activePopups = new Map();
 const proxyCredentials = new Map();
 
-function spoofHeaders(ses) {
+// In-memory fingerprint cache — avoids re-reading store on every call
+const fingerprintCache = new Map();
+
+// Get fingerprint for a partition name like "persist:of-acct_123"
+function getFingerprintForPartition(partition) {
+  if (fingerprintCache.has(partition)) return fingerprintCache.get(partition);
+  const match = partition.match(/^persist:of-(acct_\d+)$/);
+  if (!match) return null;
+  const accountId = match[1];
+  const accounts = store.get('accounts') || [];
+  const acct = accounts.find(a => a.id === accountId);
+  const fp = acct?.fingerprint || null;
+  if (fp) fingerprintCache.set(partition, fp);
+  return fp;
+}
+
+// Invalidate cache when accounts change (save, remove, sync)
+function invalidateFingerprintCache(accountId) {
+  if (accountId) {
+    fingerprintCache.delete(`persist:of-${accountId}`);
+  } else {
+    fingerprintCache.clear(); // clear all on bulk operations
+  }
+}
+
+function spoofHeaders(ses, fingerprint) {
+  const ua = fingerprint ? fingerprint.userAgent : FALLBACK_UA;
+  const hints = fingerprint ? fingerprint.clientHints : FALLBACK_HINTS;
+  // Build Accept-Language from fingerprint languages (e.g. ['en-US','en'] → 'en-US,en;q=0.9')
+  const acceptLang = fingerprint?.languages
+    ? fingerprint.languages.map((l, i) => i === 0 ? l : `${l};q=${(1 - i * 0.1).toFixed(1)}`).join(',')
+    : 'en-US,en;q=0.9';
+  // Build sec-ch-ua-full-version-list from uaData.fullVersionList
+  const fullVerList = fingerprint?.uaData?.fullVersionList
+    ? fingerprint.uaData.fullVersionList.map(b => `"${b.brand}";v="${b.version}"`).join(', ')
+    : null;
   ses.webRequest.onBeforeSendHeaders((details, callback) => {
-    details.requestHeaders['User-Agent'] = CHROME_UA;
-    Object.assign(details.requestHeaders, CHROME_HINTS);
+    details.requestHeaders['User-Agent'] = ua;
+    details.requestHeaders['Accept-Language'] = acceptLang;
+    if (fullVerList) details.requestHeaders['sec-ch-ua-full-version-list'] = fullVerList;
+    Object.assign(details.requestHeaders, hints);
     callback({ requestHeaders: details.requestHeaders });
   });
 }
 
 function openOAuthPopup(url, partition, wvContents) {
+  const fp = getFingerprintForPartition(partition);
+  const ua = fp ? fp.userAgent : FALLBACK_UA;
+
   if (activePopups.has(partition)) {
     const existing = activePopups.get(partition);
     if (!existing.isDestroyed()) {
       existing.focus();
-      existing.loadURL(url, { userAgent: CHROME_UA });
+      existing.loadURL(url, { userAgent: ua });
       return;
     }
   }
 
   const ses = session.fromPartition(partition);
-  spoofHeaders(ses);
+  spoofHeaders(ses, fp);
 
   const ALLOWED_PERMISSIONS = ['clipboard-sanitized-write', 'media'];
   ses.setPermissionRequestHandler((webContents, permission, callback) => {
@@ -84,8 +144,27 @@ function openOAuthPopup(url, partition, wvContents) {
 
   activePopups.set(partition, popup);
   popup.setMenuBarVisibility(false);
-  popup.webContents.setUserAgent(CHROME_UA);
+  popup.webContents.setUserAgent(ua);
 
+  // Inject fingerprint via CDP BEFORE loading the URL — ensures script runs before page scripts
+  if (fp) {
+    try {
+      popup.webContents.debugger.attach('1.3');
+      popup.webContents.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+        source: `window.__FP_CONFIG__=${JSON.stringify(fp)};${INJECT_SCRIPT}`,
+      }).then(() => {
+        // Detach debugger after injection — prevents anti-bot detection of attached debugger
+        try { popup.webContents.debugger.detach(); } catch {}
+      }).catch(err => {
+        console.warn('[Fingerprint] OAuth CDP inject failed:', err.message);
+        try { popup.webContents.debugger.detach(); } catch {}
+      });
+    } catch (err) {
+      console.warn('[Fingerprint] OAuth CDP attach failed:', err.message);
+    }
+  }
+
+  // Disable WebRTC passkey prompt and credential autofill
   popup.webContents.on('did-finish-load', () => {
     popup.webContents.executeJavaScript(`
       if (navigator.credentials) {
@@ -100,7 +179,7 @@ function openOAuthPopup(url, partition, wvContents) {
     `).catch(() => {});
   });
 
-  popup.loadURL(url, { userAgent: CHROME_UA });
+  popup.loadURL(url, { userAgent: ua });
 
   const onNav = (_, navUrl) => {
     if (isOnlyFansHost(navUrl)) {
@@ -116,7 +195,7 @@ function openOAuthPopup(url, partition, wvContents) {
   popup.webContents.on('did-navigate', onNav);
 
   popup.webContents.setWindowOpenHandler(({ url: subUrl }) => {
-    popup.loadURL(subUrl, { userAgent: CHROME_UA });
+    popup.loadURL(subUrl, { userAgent: ua });
     return { action: 'deny' };
   });
 
@@ -152,19 +231,54 @@ function createWindow() {
   // files are written to disk.
 
   mainWindow.webContents.on('did-attach-webview', (_, wvContents) => {
-    wvContents.setUserAgent(CHROME_UA);
-
     const prefs = wvContents.getLastWebPreferences();
     const partition = prefs?.partition || 'persist:default';
 
+    // Per-account fingerprint — re-read on each attach (not stale closure)
+    const fp = getFingerprintForPartition(partition);
+    wvContents.setUserAgent(fp ? fp.userAgent : FALLBACK_UA);
+
     const wvSession = session.fromPartition(partition);
-    spoofHeaders(wvSession);
+    spoofHeaders(wvSession, fp);
+
+    // Inject fingerprint via Chrome DevTools Protocol — runs BEFORE any page scripts.
+    // executeJavaScript runs after page scripts (too late). CDP addScriptToEvaluateOnNewDocument
+    // is the industry standard (same as Puppeteer's evaluateOnNewDocument).
+    if (fp) {
+      const fpScript = `window.__FP_CONFIG__=${JSON.stringify(fp)};${INJECT_SCRIPT}`;
+      try {
+        wvContents.debugger.attach('1.3');
+        wvContents.debugger.sendCommand('Page.addScriptToEvaluateOnNewDocument', {
+          source: fpScript,
+        }).then(() => {
+          // Detach debugger after injection — prevents anti-bot detection
+          try { wvContents.debugger.detach(); } catch {}
+        }).catch(err => {
+          console.warn('[Fingerprint] CDP inject failed:', err.message);
+          try { wvContents.debugger.detach(); } catch {}
+        });
+      } catch (err) {
+        // Debugger already attached or unavailable — fall back to executeJavaScript
+        console.warn('[Fingerprint] CDP attach failed, using fallback:', err.message);
+        wvContents.on('did-start-navigation', (event, navUrl, isInPlace, isMainFrame) => {
+          if (!isMainFrame) return;
+          const freshFp = getFingerprintForPartition(partition);
+          if (freshFp) {
+            wvContents.executeJavaScript(
+              `window.__FP_CONFIG__=${JSON.stringify(freshFp)};${INJECT_SCRIPT}`
+            ).catch(() => {});
+          }
+        });
+      }
+    }
 
     // Restrict permissions — only allow clipboard and media (for OF content)
     const WV_ALLOWED = ['clipboard-sanitized-write', 'media', 'notifications'];
     wvSession.setPermissionRequestHandler((wc, permission, callback) => {
       callback(WV_ALLOWED.includes(permission));
     });
+    // Block WebRTC IP leak — forces WebRTC to use proxy, prevents STUN from leaking real IP
+    wvContents.setWebRTCIPHandlingPolicy?.('disable_non_proxied_udp');
 
     // Close orphaned OAuth popups when webview is destroyed (e.g., account switch)
     wvContents.on('destroyed', () => {
@@ -406,7 +520,10 @@ ipcMain.handle('check-all-login-status', async () => {
   const checks = accounts.map(async (acct) => {
     try {
       const ses = session.fromPartition(`persist:of-${acct.id}`);
-      const ofCookies = await ses.cookies.get({ domain: 'onlyfans.com' });
+      const ofCookies = await Promise.race([
+        ses.cookies.get({ domain: 'onlyfans.com' }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('Timeout')), 5000)),
+      ]);
       const hasSess = ofCookies.some(c => c.name === 'sess' && c.value && c.value.length > 10);
       status[acct.id] = hasSess;
     } catch {
@@ -426,21 +543,48 @@ ipcMain.handle('check-all-login-status', async () => {
   return status;
 });
 
-// Save reordered accounts array
-ipcMain.handle('reorder-accounts', (_, accounts) => {
-  if (!Array.isArray(accounts)) return store.get('accounts') || [];
-  store.set('accounts', accounts);
-  return accounts;
+// Save reordered accounts array — only accept an array of IDs, not full objects
+ipcMain.handle('reorder-accounts', (_, orderedIds) => {
+  if (!Array.isArray(orderedIds)) return store.get('accounts') || [];
+  const existing = store.get('accounts') || [];
+  const byId = new Map(existing.map((a) => [a.id, a]));
+  // Reorder using existing account objects (prevents data injection)
+  const reordered = orderedIds.filter((id) => typeof id === 'string' && byId.has(id)).map((id) => byId.get(id));
+  // Append any accounts not in the ordered list (e.g., added by sync during drag)
+  for (const a of existing) {
+    if (!orderedIds.includes(a.id)) reordered.push(a);
+  }
+  store.set('accounts', reordered);
+  return reordered;
 });
 
-ipcMain.handle('save-account', (_, account) => {
+ipcMain.handle('save-account', async (_, account) => {
   if (!account || typeof account.id !== 'string') return store.get('accounts') || [];
   const accounts = store.get('accounts');
   const idx = accounts.findIndex((a) => a.id === account.id);
   const isExisting = idx >= 0;
+  // Auto-generate fingerprint for new accounts
+  if (!isExisting && !account.fingerprint) {
+    account.fingerprint = generateFingerprint(account.id);
+  }
+  // Auto-assign proxy for new accounts when provider is configured
+  if (!isExisting && !account.proxy) {
+    const providerConfig = store.get('proxyProvider');
+    if (providerConfig && providerConfig.type !== 'manual' && providerConfig.autoAssign) {
+      const proxy = buildProxyForAccount(providerConfig, account.id);
+      if (proxy) {
+        account.proxy = proxy;
+        // Apply proxy to session
+        const ses = session.fromPartition(`persist:of-${account.id}`);
+        await ses.setProxy({ proxyRules: buildProxyRules(proxy) });
+        registerProxyAuth(proxy);
+      }
+    }
+  }
   if (isExisting) accounts[idx] = { ...accounts[idx], ...account };
   else accounts.push(account);
   store.set('accounts', accounts);
+  invalidateFingerprintCache(account.id);
   // Only upload existing accounts — new accounts have no session data yet
   // and uploading would mark them as initialized, preventing partition downloads
   if (isExisting && firebaseSync.isInitialized) {
@@ -452,6 +596,7 @@ ipcMain.handle('save-account', (_, account) => {
 ipcMain.handle('remove-account', async (_, id) => {
   // Mark as deleted IMMEDIATELY — before any async work — so smartSync can't re-add
   firebaseSync.markAsDeleted(id);
+  invalidateFingerprintCache(id);
   const allAccounts = store.get('accounts');
   const removed = allAccounts.find((a) => a.id === id);
   const accounts = allAccounts.filter((a) => a.id !== id);
@@ -495,11 +640,10 @@ ipcMain.handle('set-proxy', async (_, data) => {
   if (proxy && (typeof proxy.host !== 'string' || typeof proxy.port !== 'string')) return false;
   const accounts = store.get('accounts');
   const idx = accounts.findIndex((a) => a.id === accountId);
-  const oldProxy = idx >= 0 ? accounts[idx].proxy : null;
-  if (idx >= 0) {
-    accounts[idx].proxy = proxy;
-    store.set('accounts', accounts);
-  }
+  if (idx < 0) return false;
+  const oldProxy = accounts[idx].proxy;
+  accounts[idx].proxy = proxy;
+  store.set('accounts', accounts);
   const ses = session.fromPartition(`persist:of-${accountId}`);
   if (oldProxy) unregisterProxyAuth(oldProxy);
   if (proxy && proxy.enabled && proxy.host && proxy.port) {
@@ -522,7 +666,7 @@ ipcMain.handle('test-proxy', async (_, { proxy }) => {
         port: parseInt(proxy.port),
         path: 'http://ip-api.com/json',
         method: 'GET',
-        headers: { Host: 'ip-api.com', 'User-Agent': CHROME_UA },
+        headers: { Host: 'ip-api.com', 'User-Agent': FALLBACK_UA },
       };
       if (proxy.username) {
         options.headers['Proxy-Authorization'] = 'Basic ' + Buffer.from(`${proxy.username}:${proxy.password}`).toString('base64');
@@ -552,6 +696,165 @@ ipcMain.handle('get-proxy', (_, accountId) => {
   const acct = accounts.find((a) => a.id === accountId);
   return acct?.proxy || null;
 });
+
+// ============ PROXY PROVIDER IPC ============
+ipcMain.handle('get-proxy-provider', () => store.get('proxyProvider'));
+
+ipcMain.handle('set-proxy-provider', (_, config) => {
+  store.set('proxyProvider', config);
+  return config;
+});
+
+ipcMain.handle('get-proxy-providers-list', () => {
+  const list = [{ key: 'manual', name: 'Manual' }];
+  for (const [key, p] of Object.entries(PROVIDERS)) {
+    list.push({ key, name: p.name });
+  }
+  return list;
+});
+
+ipcMain.handle('apply-provider-proxy', async (_, accountId) => {
+  const providerConfig = store.get('proxyProvider');
+  if (!providerConfig || providerConfig.type === 'manual') return false;
+  const proxy = buildProxyForAccount(providerConfig, accountId);
+  if (!proxy) return false;
+
+  const accounts = store.get('accounts');
+  const idx = accounts.findIndex(a => a.id === accountId);
+  if (idx < 0) return false;
+
+  const oldProxy = accounts[idx].proxy;
+  if (oldProxy) unregisterProxyAuth(oldProxy);
+  accounts[idx].proxy = proxy;
+  store.set('accounts', accounts);
+
+  const ses = session.fromPartition(`persist:of-${accountId}`);
+  await ses.setProxy({ proxyRules: buildProxyRules(proxy) });
+  registerProxyAuth(proxy);
+  return proxy;
+});
+
+let applyingAll = false;
+ipcMain.handle('apply-provider-proxy-all', async () => {
+  if (applyingAll) return false; // prevent concurrent overwrites (IPC-7)
+  applyingAll = true;
+  try {
+    const providerConfig = store.get('proxyProvider');
+    if (!providerConfig || providerConfig.type === 'manual') return false;
+    const accounts = store.get('accounts');
+
+    for (const acct of accounts) {
+      const proxy = buildProxyForAccount(providerConfig, acct.id);
+      if (!proxy) continue;
+      const oldProxy = acct.proxy;
+      if (oldProxy) unregisterProxyAuth(oldProxy);
+      acct.proxy = proxy;
+      const ses = session.fromPartition(`persist:of-${acct.id}`);
+      await ses.setProxy({ proxyRules: buildProxyRules(proxy) });
+      registerProxyAuth(proxy);
+    }
+
+    store.set('accounts', accounts);
+    return accounts;
+  } finally {
+    applyingAll = false;
+  }
+});
+
+ipcMain.handle('rotate-proxy', async (_, accountId) => {
+  const providerConfig = store.get('proxyProvider');
+  if (!providerConfig || providerConfig.type === 'manual') return { success: false, error: 'No provider configured' };
+
+  const accounts = store.get('accounts');
+  const idx = accounts.findIndex(a => a.id === accountId);
+  if (idx < 0) return { success: false, error: 'Account not found' };
+
+  const oldProxy = accounts[idx].proxy;
+  if (oldProxy) unregisterProxyAuth(oldProxy);
+
+  const proxy = rotateProxy(providerConfig, accountId);
+  if (!proxy) return { success: false, error: 'Failed to generate proxy' };
+
+  accounts[idx].proxy = proxy;
+  store.set('accounts', accounts);
+
+  const ses = session.fromPartition(`persist:of-${accountId}`);
+  await ses.setProxy({ proxyRules: buildProxyRules(proxy) });
+  registerProxyAuth(proxy);
+
+  // Quick health check on the new proxy
+  const health = await proxyHealth.checkSingleProxy(accountId, proxy);
+  return { success: true, proxy, health };
+});
+
+// ============ PROXY HEALTH IPC ============
+ipcMain.handle('get-proxy-health', () => proxyHealth.getHealthData());
+
+ipcMain.handle('check-proxy-health', async (_, accountId) => {
+  const accounts = store.get('accounts');
+  const acct = accounts.find(a => a.id === accountId);
+  if (!acct?.proxy) return null;
+  return await proxyHealth.checkSingleProxy(accountId, acct.proxy);
+});
+
+ipcMain.handle('check-all-proxy-health', async () => {
+  await proxyHealth.checkAllProxies();
+  return proxyHealth.getHealthData();
+});
+
+ipcMain.handle('dns-leak-test', async (_, accountId) => {
+  const accounts = store.get('accounts');
+  const acct = accounts.find(a => a.id === accountId);
+  if (!acct?.proxy) return { success: false, error: 'No proxy configured' };
+  return await proxyHealth.runDnsLeakTest(acct.proxy);
+});
+
+// ============ PROXY ROTATION SCHEDULER ============
+function startRotationScheduler() {
+  // Check every 10 minutes if any accounts need IP rotation
+  rotationInterval = setInterval(async () => {
+    const providerConfig = store.get('proxyProvider');
+    if (!providerConfig || providerConfig.type === 'manual') return;
+    if (!providerConfig.rotation?.enabled || !providerConfig.rotation?.intervalHours) return;
+
+    const intervalMs = providerConfig.rotation.intervalHours * 60 * 60 * 1000;
+    const accounts = store.get('accounts');
+    const now = Date.now();
+    let rotated = false;
+
+    for (const acct of accounts) {
+      if (!acct.proxy?.enabled || !acct.proxy?.providerType) continue;
+      const lastRotated = acct.proxy.lastRotated || 0;
+      if (now - lastRotated < intervalMs) continue;
+
+      const oldProxy = acct.proxy;
+      if (oldProxy) unregisterProxyAuth(oldProxy);
+
+      const proxy = rotateProxy(providerConfig, acct.id);
+      if (!proxy) continue;
+
+      acct.proxy = proxy;
+      const ses = session.fromPartition(`persist:of-${acct.id}`);
+      await ses.setProxy({ proxyRules: buildProxyRules(proxy) });
+      registerProxyAuth(proxy);
+      rotated = true;
+    }
+
+    if (rotated) {
+      store.set('accounts', accounts);
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('proxies-rotated', accounts);
+      }
+    }
+  }, 10 * 60 * 1000);
+}
+
+function stopRotationScheduler() {
+  if (rotationInterval) {
+    clearInterval(rotationInterval);
+    rotationInterval = null;
+  }
+}
 
 app.on('login', (event, _webContents, _details, authInfo, callback) => {
   if (authInfo.isProxy) {
@@ -595,10 +898,14 @@ ipcMain.handle('sync-upload-account', async (_, accountId) => {
 
 // Factory reset — wipe ALL data (local + Firestore)
 ipcMain.handle('sync-factory-reset', async () => {
+  // Stop auto-sync FIRST to prevent race condition (IPC-9)
+  firebaseSync.stopSync();
   const result = await firebaseSync.factoryReset();
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('sync-accounts-updated', []);
   }
+  // Re-init sync after reset
+  await initFirebaseSync();
   return result;
 });
 
@@ -618,6 +925,7 @@ async function initFirebaseSync() {
       },
       // Accounts updated callback (when auto-sync adds new accounts)
       async (accounts) => {
+        invalidateFingerprintCache(); // clear all — sync may have changed fingerprints
         await applyAllProxies();
         if (mainWindow && !mainWindow.isDestroyed()) {
           mainWindow.webContents.send('sync-accounts-updated', accounts);
@@ -631,12 +939,30 @@ async function initFirebaseSync() {
 
 // ============ APP LIFECYCLE ============
 app.whenReady().then(async () => {
+  // Migrate existing accounts: generate fingerprints for any that don't have one,
+  // or regenerate if fingerprint version is outdated (e.g. v2 → v3 Chrome update)
+  const existingAccounts = store.get('accounts') || [];
+  let migrated = 0;
+  for (const acct of existingAccounts) {
+    if (!acct.fingerprint || acct.fingerprint.version < 3) {
+      acct.fingerprint = generateFingerprint(acct.id);
+      migrated++;
+    }
+  }
+  if (migrated > 0) {
+    store.set('accounts', existingAccounts);
+    console.log(`[Fingerprint] Migrated ${migrated} accounts to v3 fingerprints`);
+  }
+
   createWindow();
   initAutoUpdater();
   // Init sync FIRST (downloads remote sessions, writes partition files to disk)
   await initFirebaseSync();
   // THEN apply proxies (safe to call session.fromPartition — files already exist)
   await applyAllProxies();
+  // Start health monitoring and rotation scheduler
+  proxyHealth.startHealthMonitoring(store, mainWindow);
+  startRotationScheduler();
 });
 
 app.on('before-quit', async (e) => {
@@ -648,6 +974,8 @@ app.on('before-quit', async (e) => {
   // stale cookies that overwrite valid ones during quit
   firebaseSync.stopSync();
   stopAutoUpdater();
+  proxyHealth.stopHealthMonitoring();
+  stopRotationScheduler();
 
   // Explicitly flush ALL partition cookie stores to disk.
   // app.quit() only flushes sessions attached to live webContents —
